@@ -73,8 +73,18 @@ public static class S4 {
     public static PATTERN Reduce(string tag, int n)          => new _Reduce(tag, n);
     // Pop — pops vstack top into Env[name]
     public static PATTERN Pop(string name)                   => new _Pop(name);
-    // GLOBALS
+    // Pop(Slot) — via Slot
+    public static PATTERN Pop(Slot s)                        => new _Pop(s.Name);
+    // ζ(Slot) — deferred pattern reference via Slot
+    public static PATTERN ζ(Slot s)                         => new _ζ_name(s.Name);
+    // δ/Δ Slot overloads
+    public static PATTERN δ(PATTERN p, Slot s)               => new _δ(p, s.Name);
+    public static PATTERN Δ(PATTERN p, Slot s)               => new _Δ(p, s.Name);
+    // GLOBALS — kept for backward compat
     public static void GLOBALS(Dictionary<string, object> g) => Env.GLOBALS(g);
+    // _ — global SNOBOL environment (thread-local dynamic)
+    [ThreadStatic] static SnobolEnv? __env;
+    public static dynamic _ => __env ??= new SnobolEnv();
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────

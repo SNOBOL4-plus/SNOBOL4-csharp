@@ -19,8 +19,6 @@ namespace SNOBOL4.Tests
 {
 static class Tests10
 {
-    static readonly Dictionary<string, object> G = new();
-    static string Gs(string k) => G.TryGetValue(k, out var v) ? v?.ToString() ?? "<null>" : "<unset>";
 
     const string DIGITS = "0123456789";
     const string UCASE  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -45,15 +43,15 @@ static class Tests10
     // | SPAN(DIGITS)@'whole' + . + SPAN?@'fract'
     static readonly PATTERN real_number =
           POS(0)
-        + (   (    SPAN(DIGITS) % "whole"
-               +   (σ(".") + FENCE(SPAN(DIGITS) | ε()) % "fract" | ε())
+        + (   (    SPAN(DIGITS) % (Slot)S4._.whole
+               +   (σ(".") + FENCE(SPAN(DIGITS) | ε()) % (Slot)S4._.fract | ε())
                +   (σ("E") | σ("e"))
                +   (σ("+") | σ("-") | ε())
-               +   SPAN(DIGITS) % "exp"
+               +   SPAN(DIGITS) % (Slot)S4._.exp
               )
-           |  (    SPAN(DIGITS) % "whole"
+           |  (    SPAN(DIGITS) % (Slot)S4._.whole
                +   σ(".")
-               +   FENCE(SPAN(DIGITS) | ε()) % "fract"
+               +   FENCE(SPAN(DIGITS) | ε()) % (Slot)S4._.fract
               )
           )
         + RPOS(0);
@@ -113,8 +111,8 @@ static class Tests10
 
     static readonly PATTERN re_Item =
           σ(".") + Shift(".")
-        | σ("\\") + ANY(".\\"  + "(|*+?)") % "tx" + Shift("σ", () => Gs("tx"))
-        | ANY(ALPHA + DIGITS) % "tx" + Shift("σ", () => Gs("tx"))
+        | σ("\\") + ANY(".\\"  + "(|*+?)") % (Slot)S4._.tx + Shift("σ", () => (string)(Slot)S4._.tx)
+        | ANY(ALPHA + DIGITS) % (Slot)S4._.tx + Shift("σ", () => (string)(Slot)S4._.tx)
         | σ("(") + ζ(() => re_Expression) + σ(")");
 
     static readonly PATTERN re_Factor =
@@ -131,7 +129,7 @@ static class Tests10
         + nPop();
 
     static readonly PATTERN re_RegEx =
-          POS(0) + re_Expression + Pop("RE_tree") + RPOS(0);
+          POS(0) + re_Expression + Pop((Slot)S4._.RE_tree) + RPOS(0);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Patterns from test_json.py  (module-level definitions)
@@ -141,21 +139,21 @@ static class Tests10
     static PATTERN WS(string s) => (SPAN(" \t\r\n") | ε()) + σ(s);
 
     static readonly PATTERN jInt =
-        (FENCE(σ("+") | σ("-") | ε()) + SPAN(DIGITS)) % "jxN";
+        (FENCE(σ("+") | σ("-") | ε()) + SPAN(DIGITS)) % (Slot)S4._.jxN;
 
     static readonly PATTERN jEscChar =
           σ("\\")
         + (   ANY("ntbrf\"\\/'")
             | ANY("01234567") + FENCE(ANY("01234567") | ε())
             | ANY("0123") + ANY("01234567") + ANY("01234567")
-            | σ("u") + SPAN("0123456789ABCDEFabcdef") % "jxHex" + Λ(() => Gs("jxHex").Length == 4)
+            | σ("u") + SPAN("0123456789ABCDEFabcdef") % (Slot)S4._.jxHex + Λ(() => ((Slot)S4._.jxHex).Length == 4)
           );
 
     static readonly PATTERN jNullVal =
-          σ("null") + ε() % "jxVal";
+          σ("null") + ε() % (Slot)S4._.jxVal;
 
     static readonly PATTERN jTrueFalse =
-          (σ("true") | σ("false")) % "jxVal";
+          (σ("true") | σ("false")) % (Slot)S4._.jxVal;
 
     static readonly PATTERN jIdent =
           ANY(UCASE + "_" + LCASE)
@@ -163,7 +161,7 @@ static class Tests10
 
     static readonly PATTERN jString =
           σ("\"")
-        + ((ARBNO(BREAK("\"\\n") | jEscChar)) % "jxVal")
+        + ((ARBNO(BREAK("\"\\n") | jEscChar)) % (Slot)S4._.jxVal)
         + σ("\"");
 
     static readonly PATTERN jStrVal = jString;   // no JSONDecode transform needed
@@ -173,27 +171,22 @@ static class Tests10
         | σ("\"") + jTrueFalse + σ("\"");
 
     static readonly PATTERN jRealVal =
-        ((σ("+") | σ("-") | ε()) + SPAN(DIGITS) + σ(".") + SPAN(DIGITS)) % "jxVal";
+        ((σ("+") | σ("-") | ε()) + SPAN(DIGITS) + σ(".") + SPAN(DIGITS)) % (Slot)S4._.jxVal;
 
     static readonly PATTERN jIntVal =
-          (jInt % "jxVal")
-        | σ("\"") + (jInt % "jxVal") + σ("\"");
+          (jInt % (Slot)S4._.jxVal)
+        | σ("\"") + (jInt % (Slot)S4._.jxVal) + σ("\"");
 
-    static readonly PATTERN jNum2 =
-          SPAN(DIGITS) % "jxN2" + Λ(() => Gs("jxN2").Length == 2);
-
-    static readonly PATTERN jNum3 =
-          SPAN(DIGITS) % "jxN3" + Λ(() => Gs("jxN3").Length == 3);
-
-    static readonly PATTERN jNum4 =
-          SPAN(DIGITS) % "jxN4" + Λ(() => Gs("jxN4").Length == 4);
-
-    static readonly PATTERN jYYYY = jNum4 % "jxYYYY";
-    static readonly PATTERN jMM   = jNum2 % "jxMM";
-    static readonly PATTERN jDD   = jNum2 % "jxDD";
-    static readonly PATTERN jhh   = jNum2 % "jxhh";
-    static readonly PATTERN jmm2  = jNum2 % "jxmm";
-    static readonly PATTERN jss   = jNum2 % "jxss";
+    // Each jNNN: capture directly into target var via δ (immediate), then Λ checks length
+    static readonly PATTERN jYYYY = δ(SPAN(DIGITS), "jxYYYY") + Λ(() => ((Slot)S4._.jxYYYY).Length == 4);
+    static readonly PATTERN jMM   = δ(SPAN(DIGITS), "jxMM")   + Λ(() => ((Slot)S4._.jxMM).Length   == 2);
+    static readonly PATTERN jDD   = δ(SPAN(DIGITS), "jxDD")   + Λ(() => ((Slot)S4._.jxDD).Length   == 2);
+    static readonly PATTERN jhh   = δ(SPAN(DIGITS), "jxhh")   + Λ(() => ((Slot)S4._.jxhh).Length   == 2);
+    static readonly PATTERN jmm2  = δ(SPAN(DIGITS), "jxmm")   + Λ(() => ((Slot)S4._.jxmm).Length   == 2);
+    static readonly PATTERN jss   = δ(SPAN(DIGITS), "jxss")   + Λ(() => ((Slot)S4._.jxss).Length   == 2);
+    static readonly PATTERN jNum3 = δ(SPAN(DIGITS), "jxN3")   + Λ(() => ((Slot)S4._.jxN3).Length   == 3);
+    static readonly PATTERN jNum4 = δ(SPAN(DIGITS), "jxN4")   + Λ(() => ((Slot)S4._.jxN4).Length   == 4);
+    static readonly PATTERN jNum2 = δ(SPAN(DIGITS), "jxN2")   + Λ(() => ((Slot)S4._.jxN2).Length   == 2);
     static readonly PATTERN jDate = jYYYY + σ("-") + jMM + σ("-") + jDD;
     static readonly PATTERN jTime = jhh + σ(":") + jmm2 + σ(":") + jss;
 
@@ -211,22 +204,22 @@ static class Tests10
     // jElement, jArray, jObject, jField are mutually recursive → ζ(λ)
     static PATTERN jElement =>
           WS("")
-        + (   jRealVal    + Shift("Real",    () => double.Parse(Gs("jxVal"),
+        + (   jRealVal    + Shift("Real",    () => double.Parse((string)(Slot)S4._.jxVal,
                                                     System.Globalization.CultureInfo.InvariantCulture))
-            | jIntVal     + Shift("Integer", () => (object)int.Parse(Gs("jxVal")))
-            | jBoolVal    + Shift("Bool",    () => (object)(Gs("jxVal") == "true"))
+            | jIntVal     + Shift("Integer", () => (object)int.Parse((string)(Slot)S4._.jxVal))
+            | jBoolVal    + Shift("Bool",    () => (object)((string)(Slot)S4._.jxVal == "true"))
             | jDatetime   + Shift("Datetime",() => (object)ParseDatetime())
-            | jStrVal     + Shift("String",  () => (object)Gs("jxVal"))
+            | jStrVal     + Shift("String",  () => (object)(string)(Slot)S4._.jxVal)
             | jNullVal    + Shift("Null")
             | ζ(() => jArray)
             | ζ(() => jObject)
           );
 
     static readonly PATTERN jVar =
-          WS("\"") + (jIdent | jInt) % "jxVar" + σ("\"");
+          WS("\"") + (jIdent | jInt) % (Slot)S4._.jxVar + σ("\"");
 
     static PATTERN jField =>
-          jVar + Shift("Name", () => (object)Gs("jxVar"))
+          jVar + Shift("Name", () => (object)(string)(Slot)S4._.jxVar)
         + WS(":") + jElement
         + Reduce("Attribute", 2);
 
@@ -246,11 +239,11 @@ static class Tests10
           ζ(() => jObject) + Reduce("JSON", 1);
 
     static readonly PATTERN jRecognizer =
-          POS(0) + FENCE() + jJSON + (SPAN(" \t\r\n") | ε()) + Pop("JSON_tree") + RPOS(0);
+          POS(0) + FENCE() + jJSON + (SPAN(" \t\r\n") | ε()) + Pop((Slot)S4._.JSON_tree) + RPOS(0);
 
     static (int y, int m, int d, int hh, int mm, int ss) ParseDatetime() =>
-        ( int.Parse(Gs("jxYYYY")), int.Parse(Gs("jxMM")),  int.Parse(Gs("jxDD")),
-          int.Parse(Gs("jxhh")),   int.Parse(Gs("jxmm")), int.Parse(Gs("jxss")) );
+        ( int.Parse((string)(Slot)S4._.jxYYYY), int.Parse((string)(Slot)S4._.jxMM),  int.Parse((string)(Slot)S4._.jxDD),
+          int.Parse((string)(Slot)S4._.jxhh),   int.Parse((string)(Slot)S4._.jxmm), int.Parse((string)(Slot)S4._.jxss) );
 
     // ─────────────────────────────────────────────────────────────────────────
     // Tree traversal (mirrors Python Traverse + OBJECT)
@@ -296,7 +289,6 @@ static class Tests10
     // =========================================================================
     public static void Run()
     {
-        GLOBALS(G);
         Console.WriteLine("\n=== Stage 10: Python test suite (test_01 · test_arbno · test_re_simple · test_json) ===");
 
         // ── test_01.py ────────────────────────────────────────────────────────
@@ -322,8 +314,9 @@ static class Tests10
         Test_RE_parses();
         Test_RE_tree_is_list();
         Test_RE_no_parse();
-        // ── test_json.py ──────────────────────────────────────────────────────
-        // TODO: debug JSON sub-patterns bottom-up before enabling full tests
+        // ── test_json.py ─────────────────────────────────── TODO
+        // ── v12 SnobolEnv / Slot / >> ────────────────────────────────────────
+        Test_SnobolEnv();
     }
 
     // =========================================================================
@@ -499,7 +492,7 @@ static class Tests10
             "A(A|B)*B",
         };
         foreach (var rex in cases) {
-            G.Clear(); GLOBALS(G);
+            GLOBALS(new Dictionary<string,object>());
             T.Match($"re_parses \"{rex}\"", rex, re_RegEx);
         }
     }
@@ -511,9 +504,9 @@ static class Tests10
     static void Test_RE_tree_is_list()
     {
         T.Section("test_re_simple · tree is list");
-        G.Clear(); GLOBALS(G);
+        GLOBALS(new Dictionary<string,object>());
         Engine.FULLMATCH("A|B", re_RegEx);
-        var treeOk = G.TryGetValue("RE_tree", out var tree) && tree is List<object> lst && lst.Count >= 1;
+        var treeOk = Env.G.TryGetValue("RE_tree", out var tree) && tree is List<object> lst && lst.Count >= 1;
         T.Eq("RE_tree is List with >=1 element", true, treeOk);
     }
 
@@ -523,7 +516,7 @@ static class Tests10
     {
         T.Section("test_re_simple · no parse");
         foreach (var bad in new[]{ "(", ")", "*", "+" }) {
-            G.Clear(); GLOBALS(G);
+            GLOBALS(new Dictionary<string,object>());
             T.NoMatch($"re_no_parse \"{bad}\"", bad, re_RegEx);
         }
     }
@@ -563,9 +556,9 @@ static class Tests10
     static Dictionary<string, object> JsonRoot()
     {
         if (_jsonRoot != null) return _jsonRoot;
-        G.Clear(); GLOBALS(G);
+        GLOBALS(new Dictionary<string,object>());
         var r = Engine.FULLMATCH(JSON_sample, jRecognizer);
-        if (r == null || !G.TryGetValue("JSON_tree", out var raw))
+        if (r == null || !Env.G.TryGetValue("JSON_tree", out var raw))
             throw new Exception("JSON parse failed");
         _jsonRoot = (Dictionary<string, object>)Traverse((List<object>)raw);
         return _jsonRoot;
@@ -579,7 +572,7 @@ static class Tests10
     static void Test_JSON_recognizes()
     {
         T.Section("test_json · recognizes");
-        G.Clear(); GLOBALS(G);
+        GLOBALS(new Dictionary<string,object>());
         T.Match("JSON_sample recognized", JSON_sample, jRecognizer);
     }
 
@@ -641,5 +634,159 @@ static class Tests10
         var d1 = ((int y,int m,int d,int hh,int mm,int ss))r["start_date"];
         T.Eq("r1 start_date", (2024,12,31,0,0,0), (d1.y,d1.m,d1.d,d1.hh,d1.mm,d1.ss));
     }
+
+    // ── jInt ─────────────────────────────────────────────────────────────────
+    static void Test_JSON_jInt()
+    {
+        T.Section("test_json · jInt");
+        foreach (var s in new[]{ "0","1","42","123","+7","-3","+99","-100" }) {
+            GLOBALS(new Dictionary<string,object>());
+            Engine.FULLMATCH(s, jInt);
+            T.Eq($"jInt \"{s}\" captured", s.TrimStart('+'), (string)(Slot)S4._.jxN.TrimStart('+'));
+        }
+        // jInt does not match empty or letters
+        T.Eq("jInt no match \"\"",    null, (object?)Engine.FULLMATCH("",    jInt));
+        T.Eq("jInt no match \"abc\"", null, (object?)Engine.FULLMATCH("abc", jInt));
+    }
+
+    // ── jBoolVal ─────────────────────────────────────────────────────────────
+    static void Test_JSON_jBoolVal()
+    {
+        T.Section("test_json · jBoolVal");
+        GLOBALS(new Dictionary<string,object>());
+        Engine.FULLMATCH("true",  jBoolVal); T.Eq("jBoolVal true",  "true",  (string)(Slot)S4._.jxVal);
+        Engine.FULLMATCH("false", jBoolVal); T.Eq("jBoolVal false", "false", (string)(Slot)S4._.jxVal);
+        T.Eq("jBoolVal no match \"yes\"", null, (object?)Engine.FULLMATCH("yes", jBoolVal));
+    }
+
+    // ── jRealVal ─────────────────────────────────────────────────────────────
+    static void Test_JSON_jRealVal()
+    {
+        T.Section("test_json · jRealVal");
+        foreach (var (s, expected) in new[]{
+            ("+0.75", "+0.75"), ("-1.25", "-1.25"), ("3.14", "3.14"), ("0.0", "0.0") }) {
+            GLOBALS(new Dictionary<string,object>());
+            var r = Engine.FULLMATCH(s, jRealVal);
+            T.Eq($"jRealVal \"{s}\" matched",  true, r != null);
+            T.Eq($"jRealVal \"{s}\" captured", expected, (string)(Slot)S4._.jxVal);
+        }
+        // integers and bare signs do not match
+        foreach (var s in new[]{ "42", "+", "abc" })
+            T.Eq($"jRealVal no match \"{s}\"", null, (object?)Engine.FULLMATCH(s, jRealVal));
+    }
+
+    // ── jString ──────────────────────────────────────────────────────────────
+    static void Test_JSON_jString()
+    {
+        T.Section("test_json · jString");
+        foreach (var (input, expected) in new[]{
+            ("\"hello\"",           "hello"),
+            ("\"\"",                ""),
+            ("\"hello world\"",     "hello world"),
+            ("\"jpenddreth0@census.gov\"", "jpenddreth0@census.gov"),
+            ("\"26.58.193.2\"",     "26.58.193.2"),
+        }) {
+            GLOBALS(new Dictionary<string,object>());
+            var r = Engine.FULLMATCH(input, jString);
+            T.Eq($"jString {input} matched",  true,     r != null);
+            T.Eq($"jString {input} captured", expected, (string)(Slot)S4._.jxVal);
+        }
+        // not a string
+        T.Eq("jString no match bare word", null, (object?)Engine.FULLMATCH("hello", jString));
+    }
+
+    // ── jDate ────────────────────────────────────────────────────────────────
+    static void Test_JSON_jDate()
+    {
+        T.Section("test_json · jDate (via jDatetime)");
+        foreach (var (input, y, m, d) in new[]{
+            ("\"2025-02-06\"", 2025, 2,  6),
+            ("\"2024-12-31\"", 2024, 12, 31),
+            ("\"2000-01-01\"", 2000, 1,  1),
+        }) {
+            GLOBALS(new Dictionary<string,object>());
+            var r = Engine.FULLMATCH(input, jDatetime);
+            T.Eq($"jDatetime {input} matched", true, r != null);
+            T.Eq($"jDatetime {input} YYYY", y.ToString(), (string)(Slot)S4._.jxYYYY);
+            T.Eq($"jDatetime {input} MM",   m.ToString("D2"), (string)(Slot)S4._.jxMM);
+            T.Eq($"jDatetime {input} DD",   d.ToString("D2"), (string)(Slot)S4._.jxDD);
+        }
+    }
+
+    // ── jElement scalars ─────────────────────────────────────────────────────
+    static void Test_JSON_jElement_scalars()
+    {
+        T.Section("test_json · jElement scalars");
+
+        // integer
+        GLOBALS(new Dictionary<string,object>());
+        var r = Engine.SEARCH("1", jElement);
+        T.Eq("jElement integer matched", true, r != null);
+
+        // real
+        GLOBALS(new Dictionary<string,object>());
+        r = Engine.SEARCH("+0.75", jElement);
+        T.Eq("jElement real matched", true, r != null);
+
+        // bool
+        GLOBALS(new Dictionary<string,object>());
+        r = Engine.SEARCH("true", jElement);
+        T.Eq("jElement bool matched", true, r != null);
+
+        // string
+        GLOBALS(new Dictionary<string,object>());
+        r = Engine.SEARCH("\"hello\"", jElement);
+        T.Eq("jElement string matched", true, r != null);
+
+        // null
+        GLOBALS(new Dictionary<string,object>());
+        r = Engine.SEARCH("null", jElement);
+        T.Eq("jElement null matched", true, r != null);
+    }
+    // =========================================================================
+    // SnobolEnv / Slot / >> operator — new v12 API
+    // =========================================================================
+    static void Test_SnobolEnv()
+    {
+        T.Section("v12 · SnobolEnv _ and >> operator");
+
+        // _.x = value and (string)_.x round-trip
+        S4._.word = "hello";
+        T.Eq("_.word set/get", "hello", (string)(Slot)S4._.word);
+
+        // % Slot — conditional assignment — fires only on full match success
+        S4._.w = "before";
+        Engine.FULLMATCH("abc", POS(0) + (SPAN(ALPHA) % (Slot)S4._.w) + RPOS(0));
+        T.Eq("% Slot fires on success", "abc", (string)(Slot)S4._.w);
+
+        S4._.w = "before";
+        Engine.FULLMATCH("abc123", POS(0) + (SPAN(ALPHA) % (Slot)S4._.w) + σ("NOPE") + RPOS(0));
+        T.Eq("% Slot silent on failure", "before", (string)(Slot)S4._.w);
+
+        // Slot implicit int conversion
+        S4._.n = 42;
+        int n = (Slot)S4._.n;
+        T.Eq("Slot implicit int", 42, n);
+
+        // Unset _.x returns "" — SNOBOL4 NULL semantics
+        // Use a fresh env so we know the key is absent
+        GLOBALS(new Dictionary<string,object>());
+        string unset = (Slot)S4._.unset_key;
+        T.Eq("unset slot is empty string", "", unset);
+        int unsetInt = (Slot)S4._.unset_key;
+        T.Eq("unset slot int is 0", 0, unsetInt);
+
+        // * Slot — immediate assignment — fires even on outer failure
+        S4._.imm = "before";
+        Engine.FULLMATCH("abc123", POS(0) + (SPAN(ALPHA) * (Slot)S4._.imm) + σ("NOPE") + RPOS(0));
+        T.Eq("* Slot fires immediately", "abc", (string)(Slot)S4._.imm);
+
+        // ζ(Slot) — pattern stored on _ resolved at match time
+        S4._.pat = SPAN(DIGITS);
+        T.Match("ζ(Slot) resolves PATTERN", "123", POS(0) + ζ((Slot)S4._.pat) + RPOS(0));
+        S4._.pat = SPAN(ALPHA);
+        T.Match("ζ(Slot) re-resolves after update", "abc", POS(0) + ζ((Slot)S4._.pat) + RPOS(0));
+    }
+
 }
 }
