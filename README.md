@@ -1,4 +1,4 @@
-# SNOBOL4cs
+# SNOBOL4csharp
 
 A SNOBOL4-style pattern matching library for C# (.NET 8).
 
@@ -15,7 +15,7 @@ dotnet tool install -g dotnet-script
 # Add tools to your PATH — put this in ~/.bashrc or ~/.zshrc
 export PATH="$PATH:$HOME/.dotnet/tools"
 
-# Build the library (from the SNOBOL4cs/ folder)
+# Build the library (from the SNOBOL4csharp/ folder)
 dotnet build -c Debug src/SNOBOL4
 ```
 
@@ -65,5 +65,5 @@ The `#r` directive tells dotnet-script where the compiled library lives.
 If you move your `.csx` file, adjust the path accordingly — it must point
 to `SNOBOL4.dll` relative to where you run the script from.
 
-For convenience, keep your `.csx` files in the `SNOBOL4cs/` root folder
+For convenience, keep your `.csx` files in the `SNOBOL4csharp/` root folder
 and the `#r` line stays the same for all of them.
