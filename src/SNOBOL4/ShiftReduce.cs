@@ -154,18 +154,17 @@ public sealed class _Reduce : PATTERN {
 }
 
 public sealed class _Pop : PATTERN {
-    readonly string _name;
-    public _Pop(string name) { _name = name; }
+    readonly Action<List<object>> _set;
+    public _Pop(Action<List<object>> set) { _set = set; }
 
     public override IEnumerable<Slice> γ() {
         var st   = Ϣ.Top;
-        var name = _name;
+        var set = _set;
         Action act = () => {
-            // Move the completed root node from vstack into Env so the caller
-            // can retrieve it after the match: (List<object>)((Slot)_.result).Value!
+            // Move the completed root node from vstack to the caller's variable
             var top = st.vstack[st.vstack.Count - 1];
             st.vstack.RemoveAt(st.vstack.Count - 1);
-            Env.Set(name, top);
+            set(top);
         };
         st.cstack.Add(act);
         yield return new Slice(st.pos, st.pos);

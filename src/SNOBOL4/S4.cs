@@ -7,14 +7,14 @@
 //   var ident = POS(0) + ANY(ALPHA) + NSPAN(ALNUM) + RPOS(0);
 //   Engine.FULLMATCH("Hello", ident);
 //
-// The dynamic accessor _ makes variable capture concise:
-//   SPAN(ALPHA) % (Slot)_.word    — conditional capture into _.word
-//   SPAN(ALPHA) * (Slot)_.word    — immediate capture into _.word
-//   (string)(Slot)_.word          — read back the value
+// Capture uses closed-over local variables and setter delegates:
+//   string word = "";
+//   SPAN(ALPHA) % (v => word = v)    — conditional (fires on commit)
+//   SPAN(ALPHA) * (v => word = v)    — immediate   (fires on sub-match)
 //
-// Engine holds SEARCH / MATCH / FULLMATCH — the three entry points to the
-// matching loop.  SEARCH slides the pattern across the subject; MATCH anchors
-// at position 0; FULLMATCH anchors at both ends.
+// Engine holds SEARCH / MATCH / FULLMATCH — the three entry points.
+// SEARCH slides the pattern across the subject; MATCH anchors at position 0;
+// FULLMATCH anchors at both ends.
 // ─────────────────────────────────────────────────────────────────────────────
 using System;
 using System.Collections.Generic;
@@ -24,16 +24,11 @@ namespace SNOBOL4
 public static class S4
 {
     // ── Sequence / alternation / optional ─────────────────────────────────────
-    // These factory methods are rarely needed — the + | ~ operators on PATTERN
-    // build the same objects.  They exist for cases where you want to name a
-    // combinator explicitly or pass it as a value.
     public static PATTERN Σ(params PATTERN[] ap) => new _Σ(ap);
     public static PATTERN Π(params PATTERN[] ap) => new _Π(ap);
     public static PATTERN π(PATTERN p)           => new _π(p);
 
     // ── Literal string ─────────────────────────────────────────────────────────
-    // σ(string)        — match a fixed literal
-    // σ(Func<string>)  — evaluate the string at match time
     public static PATTERN σ(string s)       => new _σ(s);
     public static PATTERN σ(Func<string> f) => new _σ(f);
 
@@ -50,14 +45,14 @@ public static class S4
     public static PATTERN SUCCEED() => new _SUCCEED();
 
     // ── Line anchors ───────────────────────────────────────────────────────────
-    public static PATTERN α() => new _α();   // start-of-line
-    public static PATTERN ω() => new _ω();   // end-of-line
+    public static PATTERN α() => new _α();
+    public static PATTERN ω() => new _ω();
 
     // ── FENCE ──────────────────────────────────────────────────────────────────
     // FENCE()   — commit: succeeds once, throws on backtrack
     // FENCE(P)  — succeed on P's matches; suppress external backtracking into P
-    public static PATTERN FENCE()           => new _FENCE();
-    public static PATTERN FENCE(PATTERN p)  => new _FENCE(p);
+    public static PATTERN FENCE()          => new _FENCE();
+    public static PATTERN FENCE(PATTERN p) => new _FENCE(p);
 
     // ── Length and position advance ────────────────────────────────────────────
     public static PATTERN LEN(int n)        => new _LEN(n);
@@ -69,8 +64,8 @@ public static class S4
     public static PATTERN REM()             => new _REM();
 
     // ── Wildcard ───────────────────────────────────────────────────────────────
-    public static PATTERN ARB()             => new _ARB();
-    public static PATTERN MARB()            => new _MARB();
+    public static PATTERN ARB()  => new _ARB();
+    public static PATTERN MARB() => new _MARB();
 
     // ── Character-class primitives ─────────────────────────────────────────────
     public static PATTERN ANY(string c)          => new _ANY(c);
@@ -79,7 +74,6 @@ public static class S4
     public static PATTERN NOTANY(Func<string> f) => new _NOTANY(f);
     public static PATTERN SPAN(string c)         => new _SPAN(c);
     public static PATTERN SPAN(Func<string> f)   => new _SPAN(f);
-    // NSPAN — like SPAN but accepts a zero-length match (never fails)
     public static PATTERN NSPAN(string c)        => new _NSPAN(c);
     public static PATTERN NSPAN(Func<string> f)  => new _NSPAN(f);
     public static PATTERN BREAK(string c)        => new _BREAK(c);
@@ -95,18 +89,18 @@ public static class S4
     public static PATTERN BAL() => new _BAL();
 
     // ── Assignment operators ───────────────────────────────────────────────────
-    // Δ — immediate: writes on every sub-match, permanent (SNOBOL4 P $ N)
-    // δ — conditional: deferred to commit, rolled back on failure (SNOBOL4 P . N)
-    public static PATTERN Δ(PATTERN p, string n) => new _Δ(p, n);
-    public static PATTERN Δ(PATTERN p, Slot s)   => new _Δ(p, s.Name);
-    public static PATTERN δ(PATTERN p, string n) => new _δ(p, n);
-    public static PATTERN δ(PATTERN p, Slot s)   => new _δ(p, s.Name);
+    // Δ — immediate: calls set on every sub-match, permanent  (SNOBOL4 P $ N)
+    // δ — conditional: deferred to commit, rolled back on failure  (SNOBOL4 P . N)
+    // These factory methods are the named-function form; the operator form
+    // P % setter  and  P * setter  is preferred at call sites.
+    public static PATTERN Δ(PATTERN p, Action<string> set) => new _Δ(p, set);
+    public static PATTERN δ(PATTERN p, Action<string> set) => new _δ(p, set);
 
     // ── Cursor-position capture ────────────────────────────────────────────────
-    // Θ — immediate: writes pos now
+    // Θ — immediate: calls set(pos) now
     // θ — conditional: defers pos write to commit
-    public static PATTERN Θ(string n) => new _Θ(n);
-    public static PATTERN θ(string n) => new _θ(n);
+    public static PATTERN Θ(Action<int> set) => new _Θ(set);
+    public static PATTERN θ(Action<int> set) => new _θ(set);
 
     // ── Predicate and action ───────────────────────────────────────────────────
     // Λ — immediate predicate: evaluates Func<bool> now, fails if false
@@ -115,65 +109,42 @@ public static class S4
     public static PATTERN λ(Action c)     => new _λ(c);
 
     // ── Deferred pattern reference ─────────────────────────────────────────────
-    // ζ(string)        — resolves Env[name] as a PATTERN at match time
     // ζ(Func<PATTERN>) — invokes lambda at match time; enables mutual recursion
-    //                    between C# variables without needing Env string names
-    // ζ(Slot)          — shorthand for ζ(slot.Name)
-    public static PATTERN ζ(string n)         => new _ζ_name(n);
-    public static PATTERN ζ(Func<PATTERN> f)  => new _ζ_func(f);
-    public static PATTERN ζ(Slot s)           => new _ζ_name(s.Name);
+    //                    between C# local variables without string indirection:
+    //   PATTERN? expr = null;
+    //   var term = σ("(") + ζ(() => expr!) + σ(")");
+    //   expr = term | SPAN(ALPHA);
+    public static PATTERN ζ(Func<PATTERN> f) => new _ζ(f);
 
     // ── Regex ──────────────────────────────────────────────────────────────────
-    // Φ — immediate regex (named groups written to Env on sub-match)
+    // Φ — immediate regex (named groups written immediately on sub-match)
     // φ — conditional regex (named groups deferred to commit)
-    public static PATTERN Φ(string rx) => new _Φ(rx);
-    public static PATTERN φ(string rx) => new _φ(rx);
+    // onCapture(name, value) is called for each named group that succeeded.
+    public static PATTERN Φ(string rx, Action<string,string> onCapture) => new _Φ(rx, onCapture);
+    public static PATTERN φ(string rx, Action<string,string> onCapture) => new _φ(rx, onCapture);
 
     // ── Shift-reduce parser stack ──────────────────────────────────────────────
     // nPush / nInc / nPop — integer child counter (drives Reduce with no explicit n)
     // Shift / Reduce / Pop — parse-tree value stack
-    public static PATTERN nPush()                        => new _nPush();
-    public static PATTERN nInc()                         => new _nInc();
-    public static PATTERN nPop()                         => new _nPop();
-    public static PATTERN Shift(string tag)              => new _Shift(tag);
+    public static PATTERN nPush()                         => new _nPush();
+    public static PATTERN nInc()                          => new _nInc();
+    public static PATTERN nPop()                          => new _nPop();
+    public static PATTERN Shift(string tag)               => new _Shift(tag);
     public static PATTERN Shift(string tag, Func<object> v) => new _Shift(tag, v);
-    public static PATTERN Reduce(string tag)             => new _Reduce(tag);
-    public static PATTERN Reduce(string tag, int n)      => new _Reduce(tag, n);
-    public static PATTERN Pop(string name)               => new _Pop(name);
-    public static PATTERN Pop(Slot s)                    => new _Pop(s.Name);
+    public static PATTERN Reduce(string tag)              => new _Reduce(tag);
+    public static PATTERN Reduce(string tag, int n)       => new _Reduce(tag, n);
+    public static PATTERN Pop(Action<List<object>> set)   => new _Pop(set);
 
-    // ── Environment ────────────────────────────────────────────────────────────
-    // GLOBALS — register an external dictionary as the Env store.
-    // Only needed when sharing a pre-existing Dictionary<string,object> with
-    // other code.  New code should use _ instead.
-    public static void GLOBALS(Dictionary<string, object> g) => Env.GLOBALS(g);
-
-    // TRACE — configure sliding-window diagnostic output.
-    // Call TRACE() with no arguments to silence it again.
+    // ── Trace ──────────────────────────────────────────────────────────────────
+    // TRACE() with no arguments silences output.
     public static void TRACE(TraceLevel level = TraceLevel.Off, int window = 12,
                              System.IO.TextWriter? output = null)
         => Tracer.TRACE(level, window, output);
-
-    // _ — the dynamic SNOBOL4 environment accessor (thread-local).
-    // Property accesses on _ return Slot objects; assignments write into Env.
-    //   _.word = "hello"        writes Env["word"]
-    //   (Slot)_.word            returns a live Slot reference
-    //   (string)(Slot)_.word    reads Env["word"] as string
-    [ThreadStatic] static SnobolEnv? __env;
-    public static dynamic _ => __env ??= new SnobolEnv();
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 // The three match entry points.  All return a nullable Slice — the span within
 // the subject that the pattern matched — or null on failure.
-//
-// SEARCH — slides the pattern across the subject, trying each start position
-//          from 0 to len in order.  Returns the first match found.
-// MATCH  — anchors at position 0  (prepends POS(0))
-// FULLMATCH — anchors at both ends  (wraps with POS(0) and RPOS(0))
-//
-// The exc parameter causes a failed match to throw F("FAIL") instead of
-// returning null — useful for mandatory matches where failure is a bug.
 //
 // Commit protocol:
 //   After the first successful yield from P.γ(), Engine fires every Action
@@ -192,7 +163,6 @@ public static class Engine
             try {
                 foreach (var sl in P.γ()) {
                     Ϣ.Pop(); popped = true;
-                    // Commit: fire all surviving deferred actions in order
                     foreach (var act in state.cstack) act();
                     return sl;
                 }
