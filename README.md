@@ -56,7 +56,7 @@ Console.WriteLine((string)(Slot)_.word);   // hello
 ## Running the tests
 
 ```bash
-dotnet run --project tests/SNOBOL4.Tests
+dotnet test tests/SNOBOL4.Tests
 ```
 
 ## The #r line
