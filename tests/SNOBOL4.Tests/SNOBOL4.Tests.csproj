@@ -22,6 +22,7 @@
     <Content Include="VBGinTASA.dat"      CopyToOutputDirectory="PreserveNewest" />
     <Content Include="porter_voc.txt"     CopyToOutputDirectory="PreserveNewest" />
     <Content Include="porter_output.txt"  CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="roman.inc"          CopyToOutputDirectory="PreserveNewest" />
     <Content Include="xunit.runner.json"  CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

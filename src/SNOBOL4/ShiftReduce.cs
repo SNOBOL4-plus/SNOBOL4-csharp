@@ -89,8 +89,9 @@ public sealed class _nPop : PATTERN {
 public sealed class _Shift : PATTERN {
     readonly string        _tag;
     readonly Func<object>? _val;   // null → tag-only form
-    public _Shift(string tag)                  { _tag = tag; _val = null; }
-    public _Shift(string tag, Func<object> val){ _tag = tag; _val = val; }
+    public _Shift()                              { _tag = ""; _val = null; }   // empty placeholder
+    public _Shift(string tag)                    { _tag = tag; _val = null; }
+    public _Shift(string tag, Func<object> val)  { _tag = tag; _val = val; }
 
     public override IEnumerable<Slice> γ() {
         var st  = Ϣ.Top;
@@ -110,8 +111,9 @@ public sealed class _Shift : PATTERN {
 }
 
 public sealed class _Reduce : PATTERN {
-    readonly string _tag;
-    readonly int    _x;   // -1 = read from istack top;  >=0 = explicit count
+    readonly string      _tag;
+    readonly Func<object>? _dynTag;  // null = use _tag; non-null = call at commit
+    readonly int         _x;   // -1 = read from istack top;  >=0 = explicit count
 
     // Tags listed here are "transparent" when they have exactly one child:
     // rather than wrapping [tag, child] the single child is left as-is.
@@ -119,28 +121,29 @@ public sealed class _Reduce : PATTERN {
     static readonly HashSet<string> _transparent =
         new() { "Σ", "Π", "snoExprList", "|", ".." };
 
-    public _Reduce(string tag, int x = -1) { _tag = tag; _x = x; }
+    public _Reduce(string tag, int x = -1)               { _tag = tag; _dynTag = null; _x = x; }
+    public _Reduce(Func<object> dynTag, int x = -1)      { _tag = "";  _dynTag = dynTag; _x = x; }
 
     public override IEnumerable<Slice> γ() {
         var st  = Ϣ.Top;
-        var tag = _tag;
+        var tag    = _tag;
+        var dynTag = _dynTag;
         var x   = _x;
         Action act = () => {
+            string resolvedTag = dynTag != null ? (dynTag()?.ToString() ?? "") : tag;
             int n = (x == -1) ? (st.itop >= 0 ? st.istack[st.itop] : 0) : x;
 
             // Reduce("Σ", 0) — the empty concatenation becomes an ε leaf
-            if (n == 0 && tag == "Σ") {
+            if (n == 0 && resolvedTag == "Σ") {
                 st.vstack.Add(new List<object> { "ε" });
                 return;
             }
 
             // Single-child transparent tag — pass the child through unchanged
-            if (n == 1 && _transparent.Contains(tag)) return;
+            if (n == 1 && _transparent.Contains(resolvedTag)) return;
 
             // General case: pop the bottom n items from vstack, wrap as a node.
-            // start is clamped so a grammar bug (fewer items than expected) does
-            // not throw; the node just gets fewer children than requested.
-            var node  = new List<object> { tag };
+            var node  = new List<object> { resolvedTag };
             int start  = Math.Max(0, st.vstack.Count - n);
             int actual = st.vstack.Count - start;
             for (int i = start; i < start + actual; i++) node.Add(st.vstack[i]);

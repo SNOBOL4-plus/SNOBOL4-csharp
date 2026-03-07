@@ -129,10 +129,13 @@ public static class S4
     public static PATTERN nPush()                         => new _nPush();
     public static PATTERN nInc()                          => new _nInc();
     public static PATTERN nPop()                          => new _nPop();
-    public static PATTERN Shift(string tag)               => new _Shift(tag);
-    public static PATTERN Shift(string tag, Func<object> v) => new _Shift(tag, v);
-    public static PATTERN Reduce(string tag)              => new _Reduce(tag);
-    public static PATTERN Reduce(string tag, int n)       => new _Reduce(tag, n);
+    public static PATTERN Shift()                            => new _Shift();
+    public static PATTERN Shift(string tag)                  => new _Shift(tag);
+    public static PATTERN Shift(string tag, Func<object> v)  => new _Shift(tag, v);
+    public static PATTERN Reduce(string tag)                 => new _Reduce(tag);
+    public static PATTERN Reduce(string tag, int n)          => new _Reduce(tag, n);
+    public static PATTERN Reduce(Func<object> dynTag)        => new _Reduce(dynTag);
+    public static PATTERN Reduce(Func<object> dynTag, int n) => new _Reduce(dynTag, n);
     public static PATTERN Pop(Action<List<object>> set)   => new _Pop(set);
 
     // ── Trace ──────────────────────────────────────────────────────────────────
