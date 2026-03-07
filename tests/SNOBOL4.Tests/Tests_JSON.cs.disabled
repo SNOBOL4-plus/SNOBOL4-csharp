@@ -1,0 +1,361 @@
+// Tests_JSON.cs — mirrors test_json.py
+//
+// Builds a complete JSON recognizer from SNOBOL4 patterns and verifies it
+// against a two-record sample.  The grammar uses Shift/Reduce/Pop to build
+// a parse tree, then Traverse() converts it to plain C# collections.
+// ─────────────────────────────────────────────────────────────────────────────
+using System;
+using System.Collections.Generic;
+using SNOBOL4;
+using static SNOBOL4.S4;
+using Xunit;
+
+namespace SNOBOL4.Tests
+{
+    public class Tests_JSON : TestBase
+    {
+        // ── Whitespace helper ─────────────────────────────────────────────────
+        static PATTERN WS(string s) => (SPAN(" \t\r\n") | ε()) + σ(s);
+
+        // ── Scalar patterns ───────────────────────────────────────────────────
+
+        static readonly PATTERN jInt =
+            (FENCE(σ("+") | σ("-") | ε()) + SPAN(DIGITS)) % (Slot)S4._.jxN;
+
+        static readonly PATTERN jEscChar =
+              σ("\\")
+            + (   ANY("ntbrf\"\\/'")
+                | ANY("01234567") + FENCE(ANY("01234567") | ε())
+                | ANY("0123") + ANY("01234567") + ANY("01234567")
+                | σ("u") + SPAN("0123456789ABCDEFabcdef") % (Slot)S4._.jxHex
+                          + Λ(() => ((Slot)S4._.jxHex).Length == 4)
+              );
+
+        static readonly PATTERN jNullVal   = σ("null") + ε() % (Slot)S4._.jxVal;
+        static readonly PATTERN jTrueFalse = (σ("true") | σ("false")) % (Slot)S4._.jxVal;
+        static readonly PATTERN jIdent     =
+              ANY(UCASE + "_" + LCASE)
+            + FENCE(SPAN(UCASE + "_" + LCASE + DIGITS) | ε());
+
+        static readonly PATTERN jString =
+              σ("\"")
+            + ((ARBNO(BREAK("\"\\n") | jEscChar)) % (Slot)S4._.jxVal)
+            + σ("\"");
+
+        static readonly PATTERN jStrVal  = jString;
+        static readonly PATTERN jBoolVal = jTrueFalse | σ("\"") + jTrueFalse + σ("\"");
+
+        static readonly PATTERN jRealVal =
+            ((σ("+") | σ("-") | ε()) + SPAN(DIGITS) + σ(".") + SPAN(DIGITS)) % (Slot)S4._.jxVal;
+
+        static readonly PATTERN jIntVal =
+              (jInt % (Slot)S4._.jxVal)
+            | σ("\"") + (jInt % (Slot)S4._.jxVal) + σ("\"");
+
+        // Date/time component patterns — Δ (immediate) so Λ can read them right away
+        static readonly PATTERN jYYYY = Δ(SPAN(DIGITS), "jxYYYY") + Λ(() => ((Slot)S4._.jxYYYY).Length == 4);
+        static readonly PATTERN jMM   = Δ(SPAN(DIGITS), "jxMM")   + Λ(() => ((Slot)S4._.jxMM).Length   == 2);
+        static readonly PATTERN jDD   = Δ(SPAN(DIGITS), "jxDD")   + Λ(() => ((Slot)S4._.jxDD).Length   == 2);
+        static readonly PATTERN jhh   = Δ(SPAN(DIGITS), "jxhh")   + Λ(() => ((Slot)S4._.jxhh).Length   == 2);
+        static readonly PATTERN jmm2  = Δ(SPAN(DIGITS), "jxmm")   + Λ(() => ((Slot)S4._.jxmm).Length   == 2);
+        static readonly PATTERN jss   = Δ(SPAN(DIGITS), "jxss")   + Λ(() => ((Slot)S4._.jxss).Length   == 2);
+        static readonly PATTERN jNum3 = Δ(SPAN(DIGITS), "jxN3")   + Λ(() => ((Slot)S4._.jxN3).Length   == 3);
+        static readonly PATTERN jNum4 = Δ(SPAN(DIGITS), "jxN4")   + Λ(() => ((Slot)S4._.jxN4).Length   == 4);
+        static readonly PATTERN jNum2 = Δ(SPAN(DIGITS), "jxN2")   + Λ(() => ((Slot)S4._.jxN2).Length   == 2);
+
+        static readonly PATTERN jDate = jYYYY + σ("-") + jMM + σ("-") + jDD;
+        static readonly PATTERN jTime = jhh   + σ(":") + jmm2 + σ(":") + jss;
+
+        static readonly PATTERN jDatetime =
+              σ("\"")
+            + (   jDate + σ("T") + jTime + σ(".") + (jNum3 | ε()) + σ("Z")
+                | jDate + σ("T") + jTime + σ("+") + jNum4
+                | jDate + σ("T") + jTime + σ("+") + jNum2 + σ(":") + jNum2
+                | jDate + σ("T") + jTime
+                | jDate + σ(" ") + jTime
+                | jDate
+              )
+            + σ("\"");
+
+        // Mutually recursive patterns — use property syntax so ζ(lambda) sees
+        // the current value each time it is called rather than a stale reference
+        static PATTERN jElement =>
+              WS("")
+            + (   jRealVal  + Shift("Real",    () => (object)double.Parse((string)(Slot)S4._.jxVal,
+                                                      System.Globalization.CultureInfo.InvariantCulture))
+                | jIntVal   + Shift("Integer", () => (object)int.Parse((string)(Slot)S4._.jxVal))
+                | jBoolVal  + Shift("Bool",    () => (object)((string)(Slot)S4._.jxVal == "true"))
+                | jDatetime + Shift("Datetime",() => (object)ParseDatetime())
+                | jStrVal   + Shift("String",  () => (object)(string)(Slot)S4._.jxVal)
+                | jNullVal  + Shift("Null")
+                | ζ(() => jArray)
+                | ζ(() => jObject)
+              );
+
+        static readonly PATTERN jVar =
+              WS("\"") + (jIdent | jInt) % (Slot)S4._.jxVar + σ("\"");
+
+        static PATTERN jField =>
+              jVar + Shift("Name", () => (object)(string)(Slot)S4._.jxVar)
+            + WS(":") + jElement
+            + Reduce("Attribute", 2);
+
+        static PATTERN jObject =>
+              WS("{") + nPush()
+            + π(jField + nInc() + ARBNO(WS(",") + jField + nInc()))
+            + WS("}") + Reduce("Object") + nPop()
+            + FENCE();
+
+        static PATTERN jArray =>
+              WS("[") + nPush()
+            + π(jElement + nInc() + ARBNO(WS(",") + jElement + nInc()))
+            + WS("]") + Reduce("Array") + nPop()
+            + FENCE();
+
+        static readonly PATTERN jJSON       = ζ(() => jObject) + Reduce("JSON", 1);
+        static readonly PATTERN jRecognizer =
+              POS(0) + FENCE() + jJSON + (SPAN(" \t\r\n") | ε()) + Pop((Slot)S4._.JSON_tree) + RPOS(0);
+
+        // ── Datetime helper ───────────────────────────────────────────────────
+
+        static (int y, int m, int d, int hh, int mm, int ss) ParseDatetime() =>
+            ( int.Parse((string)(Slot)S4._.jxYYYY), int.Parse((string)(Slot)S4._.jxMM),
+              int.Parse((string)(Slot)S4._.jxDD),
+              int.Parse((string)(Slot)S4._.jxhh),   int.Parse((string)(Slot)S4._.jxmm),
+              int.Parse((string)(Slot)S4._.jxss) );
+
+        // ── Tree traversal ────────────────────────────────────────────────────
+
+        static object Traverse(List<object> tree)
+        {
+            var tag = (string)tree[0];
+            switch (tag) {
+                case "JSON":   return Traverse((List<object>)tree[1]);
+                case "Object": {
+                    var d = new Dictionary<string, object>();
+                    for (int i = 1; i < tree.Count; i++) {
+                        var (k, v) = TraverseAttr((List<object>)tree[i]);
+                        d[k] = v;
+                    }
+                    return d;
+                }
+                case "Array": {
+                    var lst = new List<object>();
+                    for (int i = 1; i < tree.Count; i++)
+                        lst.Add(Traverse((List<object>)tree[i]));
+                    return lst;
+                }
+                case "Attribute": return (Traverse((List<object>)tree[1]), Traverse((List<object>)tree[2]));
+                case "Name":      return tree[1];
+                case "Real":      return tree[1];
+                case "Integer":   return tree[1];
+                case "String":    return tree[1];
+                case "Bool":      return tree[1];
+                case "Datetime":  return tree[1];
+                case "Null":      return null!;
+                default: throw new Exception($"Traverse: unknown tag '{tag}'");
+            }
+        }
+        static (string k, object v) TraverseAttr(List<object> node)
+        {
+            var inner = (ValueTuple<object, object>)Traverse(node);
+            return ((string)inner.Item1, inner.Item2);
+        }
+
+        // ── Sample JSON and cached parse result ───────────────────────────────
+
+        static readonly string JSON_sample = @"{  ""list"":
+      [ {
+        ""id"": 1,
+        ""first_name"": ""Jeanette"",
+        ""last_name"": ""Penddreth"",
+        ""email"": ""jpenddreth0@census.gov"",
+        ""gender"": ""Female"",
+        ""average"": +0.75,
+        ""single"": true,
+        ""ip_address"": ""26.58.193.2"",
+        ""start_date"": ""2025-02-06""
+        }
+      , {
+        ""id"": 2,
+        ""first_name"": ""Giavani"",
+        ""last_name"": ""Frediani"",
+        ""email"": ""gfrediani1@senate.gov"",
+        ""gender"": ""Male"",
+        ""average"": -1.25,
+        ""single"": false,
+        ""ip_address"": ""229.179.4.212"",
+        ""start_date"": ""2024-12-31""
+        }
+      ]
+}";
+
+        static Dictionary<string, object>? _jsonRoot;
+        static Dictionary<string, object> JsonRoot()
+        {
+            if (_jsonRoot != null) return _jsonRoot;
+            FreshEnv();
+            var r = Engine.FULLMATCH(JSON_sample, jRecognizer);
+            if (r == null || !Env.G.TryGetValue("JSON_tree", out var raw))
+                throw new Exception("JSON parse failed");
+            _jsonRoot = (Dictionary<string, object>)Traverse((List<object>)raw);
+            return _jsonRoot;
+        }
+        static List<object>                 JsonList() => (List<object>)JsonRoot()["list"];
+        static Dictionary<string, object>   Rec(int i) => (Dictionary<string, object>)JsonList()[i];
+
+        // ── Recognition ───────────────────────────────────────────────────────
+
+        [Fact]
+        public void json_recognizes_sample()
+        {
+            FreshEnv();
+            AssertMatch(JSON_sample, jRecognizer);
+        }
+
+        [Fact]
+        public void json_list_length_is_2() =>
+            Assert.Equal(2, JsonList().Count);
+
+        // ── Record 0: Jeanette Penddreth ──────────────────────────────────────
+
+        [Fact] public void r0_id()          => Assert.Equal(1,                        Rec(0)["id"]);
+        [Fact] public void r0_first_name()  => Assert.Equal("Jeanette",               Rec(0)["first_name"]);
+        [Fact] public void r0_last_name()   => Assert.Equal("Penddreth",              Rec(0)["last_name"]);
+        [Fact] public void r0_email()       => Assert.Equal("jpenddreth0@census.gov", Rec(0)["email"]);
+        [Fact] public void r0_gender()      => Assert.Equal("Female",                 Rec(0)["gender"]);
+        [Fact] public void r0_average()     => Assert.Equal(0.75,                     Rec(0)["average"]);
+        [Fact] public void r0_single()      => Assert.Equal(true,                     Rec(0)["single"]);
+        [Fact] public void r0_ip_address()  => Assert.Equal("26.58.193.2",            Rec(0)["ip_address"]);
+
+        [Fact]
+        public void r0_start_date()
+        {
+            var d = ((int y, int m, int d, int hh, int mm, int ss))Rec(0)["start_date"];
+            Assert.Equal((2025, 2, 6, 0, 0, 0), (d.y, d.m, d.d, d.hh, d.mm, d.ss));
+        }
+
+        // ── Record 1: Giavani Frediani ────────────────────────────────────────
+
+        [Fact] public void r1_id()          => Assert.Equal(2,                        Rec(1)["id"]);
+        [Fact] public void r1_first_name()  => Assert.Equal("Giavani",                Rec(1)["first_name"]);
+        [Fact] public void r1_last_name()   => Assert.Equal("Frediani",               Rec(1)["last_name"]);
+        [Fact] public void r1_email()       => Assert.Equal("gfrediani1@senate.gov",  Rec(1)["email"]);
+        [Fact] public void r1_gender()      => Assert.Equal("Male",                   Rec(1)["gender"]);
+        [Fact] public void r1_average()     => Assert.Equal(-1.25,                    Rec(1)["average"]);
+        [Fact] public void r1_single()      => Assert.Equal(false,                    Rec(1)["single"]);
+        [Fact] public void r1_ip_address()  => Assert.Equal("229.179.4.212",          Rec(1)["ip_address"]);
+
+        [Fact]
+        public void r1_start_date()
+        {
+            var d = ((int y, int m, int d, int hh, int mm, int ss))Rec(1)["start_date"];
+            Assert.Equal((2024, 12, 31, 0, 0, 0), (d.y, d.m, d.d, d.hh, d.mm, d.ss));
+        }
+
+        // ── Scalar pattern unit tests ─────────────────────────────────────────
+
+        [Theory]
+        [InlineData("0")] [InlineData("1")] [InlineData("42")] [InlineData("123")]
+        [InlineData("+7")] [InlineData("-3")] [InlineData("+99")] [InlineData("-100")]
+        public void jInt_captures(string s)
+        {
+            FreshEnv();
+            Engine.FULLMATCH(s, jInt);
+            Assert.Equal(s.TrimStart('+'), ((string)(Slot)S4._.jxN).TrimStart('+'));
+        }
+
+        [Theory]
+        [InlineData("")]
+        [InlineData("abc")]
+        public void jInt_no_match(string s)
+        {
+            FreshEnv();
+            Assert.Null(Engine.FULLMATCH(s, jInt));
+        }
+
+        [Theory]
+        [InlineData("true",  "true")]
+        [InlineData("false", "false")]
+        public void jBoolVal_captures(string input, string expected)
+        {
+            FreshEnv();
+            Engine.FULLMATCH(input, jBoolVal);
+            Assert.Equal(expected, (string)(Slot)S4._.jxVal);
+        }
+
+        [Fact]
+        public void jBoolVal_no_match_yes()
+        {
+            FreshEnv();
+            Assert.Null(Engine.FULLMATCH("yes", jBoolVal));
+        }
+
+        [Theory]
+        [InlineData("+0.75", "+0.75")]
+        [InlineData("-1.25", "-1.25")]
+        [InlineData("3.14",  "3.14")]
+        [InlineData("0.0",   "0.0")]
+        public void jRealVal_captures(string input, string expected)
+        {
+            FreshEnv();
+            Assert.NotNull(Engine.FULLMATCH(input, jRealVal));
+            Assert.Equal(expected, (string)(Slot)S4._.jxVal);
+        }
+
+        [Theory]
+        [InlineData("42")]
+        [InlineData("+")]
+        [InlineData("abc")]
+        public void jRealVal_no_match(string s)
+        {
+            FreshEnv();
+            Assert.Null(Engine.FULLMATCH(s, jRealVal));
+        }
+
+        [Theory]
+        [InlineData("\"hello\"",                    "hello")]
+        [InlineData("\"\"",                         "")]
+        [InlineData("\"hello world\"",              "hello world")]
+        [InlineData("\"jpenddreth0@census.gov\"",   "jpenddreth0@census.gov")]
+        [InlineData("\"26.58.193.2\"",              "26.58.193.2")]
+        public void jString_captures(string input, string expected)
+        {
+            FreshEnv();
+            Assert.NotNull(Engine.FULLMATCH(input, jString));
+            Assert.Equal(expected, (string)(Slot)S4._.jxVal);
+        }
+
+        [Fact]
+        public void jString_no_match_bare_word()
+        {
+            FreshEnv();
+            Assert.Null(Engine.FULLMATCH("hello", jString));
+        }
+
+        [Theory]
+        [InlineData("\"2025-02-06\"", 2025, 2,  6)]
+        [InlineData("\"2024-12-31\"", 2024, 12, 31)]
+        [InlineData("\"2000-01-01\"", 2000, 1,  1)]
+        public void jDatetime_captures_date(string input, int y, int m, int d)
+        {
+            FreshEnv();
+            Assert.NotNull(Engine.FULLMATCH(input, jDatetime));
+            Assert.Equal(y.ToString(),      (string)(Slot)S4._.jxYYYY);
+            Assert.Equal(m.ToString("D2"),  (string)(Slot)S4._.jxMM);
+            Assert.Equal(d.ToString("D2"),  (string)(Slot)S4._.jxDD);
+        }
+
+        [Theory]
+        [InlineData("1")]
+        [InlineData("+0.75")]
+        [InlineData("true")]
+        [InlineData("\"hello\"")]
+        [InlineData("null")]
+        public void jElement_matches_scalar(string input)
+        {
+            FreshEnv();
+            AssertFound(input, jElement);
+        }
+    }
+}
