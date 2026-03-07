@@ -1,530 +1,653 @@
-// SNOBOL4cs_v3.cs  —  SNOBOL4 pattern engine in C#, Version 3
+// SNOBOL4cs_v5.cs  —  SNOBOL4 pattern engine in C#, Version 5
 //
-// Change from V2: factory functions.
+// Stage 4 — Character-class primitives:
+//   ANY(chars)     match exactly one character from chars
+//   NOTANY(chars)  match exactly one character NOT in chars
+//   SPAN(chars)    match one-or-more characters from chars (longest, yields once)
+//   NSPAN(chars)   match zero-or-more characters from chars (yields once, never fails)
+//   BREAK(chars)   match zero-or-more chars UP TO (not including) a char in chars;
+//                  succeeds only if that terminator is actually present
+//   BREAKX(chars)  alias for BREAK
 //
-//   Before:  new POS(0) + new FENCE() + new σ("ab") + new RPOS(0)
-//   After:   POS(0) + FENCE() + σ("ab") + RPOS(0)
+// Together these unlock identifier/real_number patterns from test_01.py.
 //
-// Convention:
-//   Implementation classes  →  underscore prefix: _σ, _Σ, _POS, _FENCE, …
-//   Public factory functions →  exact SNOBOL4 name: σ(), Σ(), POS(), FENCE(), …
-//
-// All factory functions live in one static class S4 and are pulled into scope
-// with a top-level  using static S4;  so call sites need no qualifier.
-//
-// Everything else (γ protocol, Ϣ stack, Engine) is unchanged from V2.
+// Carried forward unchanged: σ Σ Π π POS RPOS ε FAIL ABORT SUCCEED α ω FENCE
+//                             LEN TAB RTAB REM ARB MARB
 // ─────────────────────────────────────────────────────────────────────────────
 
 using System;
 using System.Collections.Generic;
-using static S4;           // brings all factory functions into global scope
+using static S4;
 
-// ── F — match-failure / abort exception ──────────────────────────────────────
-
-sealed class F : Exception
-{
-    public F(string msg) : base(msg) { }
-}
-
-// ── MatchState ────────────────────────────────────────────────────────────────
+sealed class F : Exception { public F(string m) : base(m) {} }
 
 sealed class MatchState
 {
-    public int    pos;
-    public string subject;
-    public MatchState(int pos, string subject) { this.pos = pos; this.subject = subject; }
+    public int pos; public string subject;
+    public MatchState(int p, string s) { pos=p; subject=s; }
 }
-
-// ── Ϣ — global match-state stack ─────────────────────────────────────────────
 
 static class Ϣ
 {
-    static readonly Stack<MatchState> _stack = new();
-    public static void       Push(MatchState s) => _stack.Push(s);
-    public static void       Pop()              => _stack.Pop();
-    public static MatchState Top                => _stack.Peek();
+    static readonly Stack<MatchState> _s = new();
+    public static void       Push(MatchState s) => _s.Push(s);
+    public static void       Pop()              => _s.Pop();
+    public static MatchState Top                => _s.Peek();
 }
-
-// ── Slice ─────────────────────────────────────────────────────────────────────
 
 readonly struct Slice
 {
     public readonly int Start, Stop;
-    public Slice(int start, int stop) { Start = start; Stop = stop; }
+    public Slice(int s, int e) { Start=s; Stop=e; }
     public override string ToString() => $"[{Start}:{Stop}]";
 }
-
-// ── PATTERN base class ────────────────────────────────────────────────────────
 
 abstract class PATTERN
 {
     public abstract IEnumerable<Slice> γ();
-
-    // P + Q  →  _Σ(P, Q)
-    public static PATTERN operator +(PATTERN p, PATTERN q)
-    {
-        if (p is _Σ ps) { var ap = new PATTERN[ps._AP.Length + 1]; ps._AP.CopyTo(ap, 0); ap[ps._AP.Length] = q; return new _Σ(ap); }
-        return new _Σ(p, q);
+    public static PATTERN operator +(PATTERN p, PATTERN q) {
+        if (p is _Σ ps) { var a=new PATTERN[ps._AP.Length+1]; ps._AP.CopyTo(a,0); a[ps._AP.Length]=q; return new _Σ(a); }
+        return new _Σ(p,q);
     }
-
-    // P | Q  →  _Π(P, Q)
-    public static PATTERN operator |(PATTERN p, PATTERN q)
-    {
-        if (p is _Π pp) { var ap = new PATTERN[pp._AP.Length + 1]; pp._AP.CopyTo(ap, 0); ap[pp._AP.Length] = q; return new _Π(ap); }
-        return new _Π(p, q);
+    public static PATTERN operator |(PATTERN p, PATTERN q) {
+        if (p is _Π pp) { var a=new PATTERN[pp._AP.Length+1]; pp._AP.CopyTo(a,0); a[pp._AP.Length]=q; return new _Π(a); }
+        return new _Π(p,q);
     }
-
-    // ~P  →  π(P)
     public static PATTERN operator ~(PATTERN p) => new _π(p);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Implementation classes  (underscore prefix — not part of the public API)
-// ═════════════════════════════════════════════════════════════════════════════
+// ── V4 carry-forward ──────────────────────────────────────────────────────────
 
-// ── _σ ───────────────────────────────────────────────────────────────────────
-
-sealed class _σ : PATTERN
-{
-    readonly string _s;
-    public _σ(string s) { _s = s; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top; int pos0 = st.pos;
-        if (pos0 + _s.Length <= st.subject.Length &&
-            string.CompareOrdinal(st.subject, pos0, _s, 0, _s.Length) == 0)
-        {
-            st.pos = pos0 + _s.Length;
-            yield return new Slice(pos0, st.pos);
-            st.pos = pos0;
-        }
+sealed class _σ : PATTERN {
+    readonly string _s; public _σ(string s){_s=s;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int p=st.pos;
+        if (p+_s.Length<=st.subject.Length && string.CompareOrdinal(st.subject,p,_s,0,_s.Length)==0)
+            { st.pos=p+_s.Length; yield return new Slice(p,st.pos); st.pos=p; }
     }
-
-    public override string ToString() => $"σ(\"{_s}\")";
 }
-
-// ── _Σ — sequence ─────────────────────────────────────────────────────────────
-
-sealed class _Σ : PATTERN
-{
-    internal readonly PATTERN[] _AP;
-    public _Σ(params PATTERN[] ap) { _AP = ap; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top; int pos0 = st.pos; int n = _AP.Length;
-        var Ag = new IEnumerator<Slice>?[n];
-        int cursor = 0;
-        while (cursor >= 0)
-        {
-            if (cursor >= n) { yield return new Slice(pos0, st.pos); cursor--; continue; }
-            if (Ag[cursor] == null) Ag[cursor] = _AP[cursor].γ().GetEnumerator();
-            if (Ag[cursor]!.MoveNext()) cursor++;
-            else { Ag[cursor]!.Dispose(); Ag[cursor] = null; cursor--; }
+sealed class _Σ : PATTERN {
+    internal readonly PATTERN[] _AP; public _Σ(params PATTERN[] ap){_AP=ap;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int p0=st.pos; int n=_AP.Length;
+        var Ag=new IEnumerator<Slice>?[n]; int c=0;
+        while (c>=0) {
+            if (c>=n) { yield return new Slice(p0,st.pos); c--; continue; }
+            if (Ag[c]==null) Ag[c]=_AP[c].γ().GetEnumerator();
+            if (Ag[c]!.MoveNext()) c++;
+            else { Ag[c]!.Dispose(); Ag[c]=null; c--; }
         }
         foreach (var e in Ag) e?.Dispose();
     }
-
-    public override string ToString() => $"Σ(*{_AP.Length})";
 }
-
-// ── _Π — alternation ──────────────────────────────────────────────────────────
-
-sealed class _Π : PATTERN
-{
-    internal readonly PATTERN[] _AP;
-    public _Π(params PATTERN[] ap) { _AP = ap; }
-
-    public override IEnumerable<Slice> γ()
-    {
+sealed class _Π : PATTERN {
+    internal readonly PATTERN[] _AP; public _Π(params PATTERN[] ap){_AP=ap;}
+    public override IEnumerable<Slice> γ() {
         foreach (var P in _AP) foreach (var s in P.γ()) yield return s;
     }
-
-    public override string ToString() => $"Π(*{_AP.Length})";
 }
-
-// ── _POS / _RPOS ──────────────────────────────────────────────────────────────
-
-sealed class _POS : PATTERN
-{
-    readonly int _n;
-    public _POS(int n) { _n = n; }
+sealed class _POS  : PATTERN { readonly int _n; public _POS(int n){_n=n;}
     public override IEnumerable<Slice> γ()
-    { var st = Ϣ.Top; if (st.pos == _n) yield return new Slice(st.pos, st.pos); }
-}
-
-sealed class _RPOS : PATTERN
-{
-    readonly int _n;
-    public _RPOS(int n) { _n = n; }
+    { var s=Ϣ.Top; if(s.pos==_n) yield return new Slice(s.pos,s.pos); } }
+sealed class _RPOS : PATTERN { readonly int _n; public _RPOS(int n){_n=n;}
     public override IEnumerable<Slice> γ()
-    { var st = Ϣ.Top; if (st.pos == st.subject.Length - _n) yield return new Slice(st.pos, st.pos); }
-}
-
-// ── _ε ────────────────────────────────────────────────────────────────────────
-
-sealed class _ε : PATTERN
-{
+    { var s=Ϣ.Top; if(s.pos==s.subject.Length-_n) yield return new Slice(s.pos,s.pos); } }
+sealed class _ε : PATTERN {
     public override IEnumerable<Slice> γ()
-    { var st = Ϣ.Top; yield return new Slice(st.pos, st.pos); }
-    public override string ToString() => "ε()";
-}
-
-// ── _FAIL ─────────────────────────────────────────────────────────────────────
-
-sealed class _FAIL : PATTERN
-{
-    public override IEnumerable<Slice> γ() { yield break; }
-    public override string ToString() => "FAIL()";
-}
-
-// ── _ABORT ────────────────────────────────────────────────────────────────────
-
-sealed class _ABORT : PATTERN
-{
-    public override IEnumerable<Slice> γ()
-    {
+    { var s=Ϣ.Top; yield return new Slice(s.pos,s.pos); } }
+sealed class _FAIL    : PATTERN { public override IEnumerable<Slice> γ() { yield break; } }
+sealed class _ABORT   : PATTERN {
+    public override IEnumerable<Slice> γ() {
         throw new F("ABORT");
 #pragma warning disable CS0162
         yield break;
 #pragma warning restore CS0162
     }
-    public override string ToString() => "ABORT()";
 }
-
-// ── _SUCCEED ──────────────────────────────────────────────────────────────────
-
-sealed class _SUCCEED : PATTERN
-{
+sealed class _SUCCEED : PATTERN {
     public override IEnumerable<Slice> γ()
-    { var st = Ϣ.Top; while (true) yield return new Slice(st.pos, st.pos); }
-    public override string ToString() => "SUCCEED()";
-}
-
-// ── _π — optional ────────────────────────────────────────────────────────────
-
-sealed class _π : PATTERN
-{
-    readonly PATTERN _P;
-    public _π(PATTERN p) { _P = p; }
-    public override IEnumerable<Slice> γ()
-    {
+    { var s=Ϣ.Top; while(true) yield return new Slice(s.pos,s.pos); } }
+sealed class _π : PATTERN {
+    readonly PATTERN _P; public _π(PATTERN p){_P=p;}
+    public override IEnumerable<Slice> γ() {
         foreach (var s in _P.γ()) yield return s;
-        var st = Ϣ.Top; yield return new Slice(st.pos, st.pos);
+        var st=Ϣ.Top; yield return new Slice(st.pos,st.pos);
     }
-    public override string ToString() => $"π({_P})";
 }
-
-// ── _α / _ω — line anchors ────────────────────────────────────────────────────
-
-sealed class _α : PATTERN
-{
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top;
-        if (st.pos == 0 || (st.pos > 0 && st.subject[st.pos - 1] == '\n'))
-            yield return new Slice(st.pos, st.pos);
+sealed class _α : PATTERN {
+    public override IEnumerable<Slice> γ() {
+        var s=Ϣ.Top;
+        if (s.pos==0||(s.pos>0&&s.subject[s.pos-1]=='\n'))
+            yield return new Slice(s.pos,s.pos);
     }
-    public override string ToString() => "α()";
 }
-
-sealed class _ω : PATTERN
-{
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top;
-        if (st.pos == st.subject.Length ||
-            (st.pos < st.subject.Length && st.subject[st.pos] == '\n'))
-            yield return new Slice(st.pos, st.pos);
+sealed class _ω : PATTERN {
+    public override IEnumerable<Slice> γ() {
+        var s=Ϣ.Top;
+        if (s.pos==s.subject.Length||(s.pos<s.subject.Length&&s.subject[s.pos]=='\n'))
+            yield return new Slice(s.pos,s.pos);
     }
-    public override string ToString() => "ω()";
 }
-
-// ── _FENCE ────────────────────────────────────────────────────────────────────
-
-sealed class _FENCE : PATTERN
-{
-    readonly PATTERN? _P;
-    public _FENCE()           { _P = null; }
-    public _FENCE(PATTERN p)  { _P = p; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        if (_P == null)
-        {
-            var st = Ϣ.Top;
-            yield return new Slice(st.pos, st.pos);
-            throw new F("FENCE");
-        }
-        else
-        {
-            foreach (var s in _P.γ()) yield return s;
-        }
+sealed class _FENCE : PATTERN {
+    readonly PATTERN? _P; public _FENCE(){_P=null;} public _FENCE(PATTERN p){_P=p;}
+    public override IEnumerable<Slice> γ() {
+        if (_P==null) { var s=Ϣ.Top; yield return new Slice(s.pos,s.pos); throw new F("FENCE"); }
+        else { foreach (var s in _P.γ()) yield return s; }
     }
-    public override string ToString() => _P == null ? "FENCE()" : $"FENCE({_P})";
+}
+sealed class _LEN : PATTERN {
+    readonly int _n; public _LEN(int n){_n=n;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top;
+        if (st.pos+_n<=st.subject.Length)
+            { int p=st.pos; st.pos+=_n; yield return new Slice(p,st.pos); st.pos=p; }
+    }
+}
+sealed class _TAB : PATTERN {
+    readonly int _n; public _TAB(int n){_n=n;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top;
+        if (_n<=st.subject.Length&&_n>=st.pos)
+            { int p=st.pos; st.pos=_n; yield return new Slice(p,_n); st.pos=p; }
+    }
+}
+sealed class _RTAB : PATTERN {
+    readonly int _n; public _RTAB(int n){_n=n;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int abs=st.subject.Length-_n;
+        if (_n<=st.subject.Length&&abs>=st.pos)
+            { int p=st.pos; st.pos=abs; yield return new Slice(p,abs); st.pos=p; }
+    }
+}
+sealed class _REM : PATTERN {
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int p=st.pos;
+        st.pos=st.subject.Length; yield return new Slice(p,st.pos); st.pos=p;
+    }
+}
+sealed class _ARB : PATTERN {
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int p=st.pos;
+        while (st.pos<=st.subject.Length) { yield return new Slice(p,st.pos); st.pos++; }
+        st.pos=p;
+    }
+}
+sealed class _MARB : PATTERN {
+    readonly _ARB _arb=new();
+    public override IEnumerable<Slice> γ() => _arb.γ();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// S4 — factory functions (the public API)
+// Stage 4 — Character-class implementations
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ── _ANY — match exactly one character from the set ───────────────────────────
 //
-// Every name here matches the SNOBOL4 / Python convention exactly.
-// "using static S4" at the top of the file brings all of these into scope.
+// Python:
+//   if pos < len(subject) and subject[pos] in chars:
+//       pos += 1
+//       yield slice(pos-1, pos)
+//       pos -= 1
+//
+// Yields at most once (0 or 1 match). Always single-char.
+
+sealed class _ANY : PATTERN
+{
+    readonly string _chars;
+    public _ANY(string chars) { _chars = chars; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top;
+        if (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) >= 0)
+        {
+            int p = st.pos;
+            st.pos++;
+            yield return new Slice(p, st.pos);
+            st.pos = p;
+        }
+    }
+
+    public override string ToString() => $"ANY(\"{_chars}\")";
+}
+
+// ── _NOTANY — match exactly one character NOT in the set ──────────────────────
+//
+// Python:
+//   if pos < len(subject) and subject[pos] not in chars:
+//       pos += 1
+//       yield slice(pos-1, pos)
+//       pos -= 1
+
+sealed class _NOTANY : PATTERN
+{
+    readonly string _chars;
+    public _NOTANY(string chars) { _chars = chars; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top;
+        if (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) < 0)
+        {
+            int p = st.pos;
+            st.pos++;
+            yield return new Slice(p, st.pos);
+            st.pos = p;
+        }
+    }
+
+    public override string ToString() => $"NOTANY(\"{_chars}\")";
+}
+
+// ── _SPAN — match one-or-more characters from the set ─────────────────────────
+//
+// Python:
+//   while pos < len(subject) and subject[pos] in chars: pos += 1
+//   if pos > pos0:            ← requires at least one character
+//       yield slice(pos0, pos)
+//       pos = pos0
+//
+// SPAN fails on an empty match. It yields exactly once (non-backtracking).
+
+sealed class _SPAN : PATTERN
+{
+    readonly string _chars;
+    public _SPAN(string chars) { _chars = chars; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top; int p = st.pos;
+        while (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) >= 0)
+            st.pos++;
+        if (st.pos > p)                         // at least one char consumed
+        {
+            yield return new Slice(p, st.pos);
+            st.pos = p;
+        }
+    }
+
+    public override string ToString() => $"SPAN(\"{_chars}\")";
+}
+
+// ── _NSPAN — match zero-or-more characters from the set ──────────────────────
+//
+// Python:
+//   while pos < len(subject) and subject[pos] in chars: pos += 1
+//   yield slice(pos0, pos)    ← always yields, even on zero chars
+//   pos = pos0
+//
+// NSPAN never fails. The "N" stands for "Null allowed" (zero-length OK).
+
+sealed class _NSPAN : PATTERN
+{
+    readonly string _chars;
+    public _NSPAN(string chars) { _chars = chars; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top; int p = st.pos;
+        while (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) >= 0)
+            st.pos++;
+        yield return new Slice(p, st.pos);      // always yield, even zero-length
+        st.pos = p;
+    }
+
+    public override string ToString() => $"NSPAN(\"{_chars}\")";
+}
+
+// ── _BREAK — scan forward until a char in the set is found ────────────────────
+//
+// Python:
+//   while pos < len(subject) and subject[pos] not in chars: pos += 1
+//   if pos < len(subject):    ← the break char must actually be present
+//       yield slice(pos0, pos)
+//       pos = pos0
+//
+// Key points:
+//   • BREAK *can* yield a zero-length match (if the break char is at pos0).
+//   • BREAK fails if end-of-string is reached without finding the break char.
+//   • Like SPAN, it yields at most once (non-backtracking).
+
+sealed class _BREAK : PATTERN
+{
+    readonly string _chars;
+    public _BREAK(string chars) { _chars = chars; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top; int p = st.pos;
+        while (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) < 0)
+            st.pos++;
+        if (st.pos < st.subject.Length)         // terminator found — not at end
+        {
+            yield return new Slice(p, st.pos);
+            st.pos = p;
+        }
+    }
+
+    public override string ToString() => $"BREAK(\"{_chars}\")";
+}
+
+// ── _BREAKX — alias for BREAK (Python: class BREAKX(BREAK): pass) ────────────
+//
+// In full SNOBOL4, BREAKX differs from BREAK in that on backtrack it advances
+// past the break character and tries again. The pure-Python backend treats them
+// identically. We follow suit here; BREAKX will be differentiated if/when a
+// full backtracking variant is needed.
+
+sealed class _BREAKX : PATTERN
+{
+    readonly _BREAK _brk;
+    public _BREAKX(string chars) { _brk = new _BREAK(chars); }
+    public override IEnumerable<Slice> γ() => _brk.γ();
+    public override string ToString() => $"BREAKX(\"{_brk}\")";
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// S4 — factory functions
 // ═════════════════════════════════════════════════════════════════════════════
 
 static class S4
 {
-    // Combinators
+    // V4 carry-forward
     public static PATTERN Σ(params PATTERN[] ap)  => new _Σ(ap);
     public static PATTERN Π(params PATTERN[] ap)  => new _Π(ap);
     public static PATTERN π(PATTERN p)            => new _π(p);
-
-    // String literal
     public static PATTERN σ(string s)             => new _σ(s);
-
-    // Position anchors
     public static PATTERN POS(int n)              => new _POS(n);
     public static PATTERN RPOS(int n)             => new _RPOS(n);
-
-    // Trivials
     public static PATTERN ε()                     => new _ε();
     public static PATTERN FAIL()                  => new _FAIL();
     public static PATTERN ABORT()                 => new _ABORT();
     public static PATTERN SUCCEED()               => new _SUCCEED();
-
-    // Line anchors
     public static PATTERN α()                     => new _α();
     public static PATTERN ω()                     => new _ω();
-
-    // Fence — two overloads, one name
     public static PATTERN FENCE()                 => new _FENCE();
     public static PATTERN FENCE(PATTERN p)        => new _FENCE(p);
+    public static PATTERN LEN(int n)              => new _LEN(n);
+    public static PATTERN TAB(int n)              => new _TAB(n);
+    public static PATTERN RTAB(int n)             => new _RTAB(n);
+    public static PATTERN REM()                   => new _REM();
+    public static PATTERN ARB()                   => new _ARB();
+    public static PATTERN MARB()                  => new _MARB();
+    // Stage 4
+    public static PATTERN ANY(string chars)       => new _ANY(chars);
+    public static PATTERN NOTANY(string chars)    => new _NOTANY(chars);
+    public static PATTERN SPAN(string chars)      => new _SPAN(chars);
+    public static PATTERN NSPAN(string chars)     => new _NSPAN(chars);
+    public static PATTERN BREAK(string chars)     => new _BREAK(chars);
+    public static PATTERN BREAKX(string chars)    => new _BREAKX(chars);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Engine
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Engine ────────────────────────────────────────────────────────────────────
 
 static class Engine
 {
-    public static Slice? SEARCH(string S, PATTERN P, bool exc = false)
+    public static Slice? SEARCH(string S, PATTERN P, bool exc=false)
     {
-        for (int cursor = 0; cursor <= S.Length; cursor++)
-        {
-            Ϣ.Push(new MatchState(cursor, S));
-            bool popped = false;
-            try
-            {
-                foreach (var slyce in P.γ())
-                { Ϣ.Pop(); popped = true; return slyce; }
+        for (int c=0; c<=S.Length; c++) {
+            Ϣ.Push(new MatchState(c,S));
+            bool popped=false;
+            try {
+                foreach (var sl in P.γ()) { Ϣ.Pop(); popped=true; return sl; }
             }
-            catch (F)
-            {
-                if (!popped) { Ϣ.Pop(); popped = true; }
+            catch (F) {
+                if (!popped){Ϣ.Pop();popped=true;}
                 if (exc) throw;
                 return null;
             }
-            finally
-            {
-                if (!popped) Ϣ.Pop();
-            }
+            finally { if (!popped) Ϣ.Pop(); }
         }
         if (exc) throw new F("FAIL");
         return null;
     }
-
-    public static Slice? MATCH(string S, PATTERN P, bool exc = false)
-        => SEARCH(S, POS(0) + P, exc);
-
-    public static Slice? FULLMATCH(string S, PATTERN P, bool exc = false)
-        => SEARCH(S, POS(0) + P + RPOS(0), exc);
+    public static Slice? MATCH    (string S,PATTERN P,bool exc=false) => SEARCH(S,POS(0)+P,exc);
+    public static Slice? FULLMATCH(string S,PATTERN P,bool exc=false) => SEARCH(S,POS(0)+P+RPOS(0),exc);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Test harness
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Test harness ──────────────────────────────────────────────────────────────
 
 static class T
 {
     static int _pass, _fail;
-
-    public static void Match   (string lbl, string s, PATTERN P) => Report(lbl, Engine.FULLMATCH(s, P) != null);
-    public static void NoMatch (string lbl, string s, PATTERN P) => Report(lbl, Engine.FULLMATCH(s, P) == null);
-    public static void Found   (string lbl, string s, PATTERN P) => Report(lbl, Engine.SEARCH(s, P) != null);
-    public static void NotFound(string lbl, string s, PATTERN P) => Report(lbl, Engine.SEARCH(s, P) == null);
-
-    public static void Slice(string lbl, string s, PATTERN P, int start, int stop)
-    {
-        var r = Engine.SEARCH(s, P);
-        Report(lbl, r != null && r.Value.Start == start && r.Value.Stop == stop);
+    public static void Match   (string l,string s,PATTERN P) => Rep(l,Engine.FULLMATCH(s,P)!=null);
+    public static void NoMatch (string l,string s,PATTERN P) => Rep(l,Engine.FULLMATCH(s,P)==null);
+    public static void Found   (string l,string s,PATTERN P) => Rep(l,Engine.SEARCH(s,P)!=null);
+    public static void NotFound(string l,string s,PATTERN P) => Rep(l,Engine.SEARCH(s,P)==null);
+    public static void Slice(string l,string s,PATTERN P,int start,int stop) {
+        var r=Engine.SEARCH(s,P);
+        Rep(l,r!=null&&r.Value.Start==start&&r.Value.Stop==stop);
     }
-
-    public static void Throws(string lbl, string s, PATTERN P)
-    {
-        bool ok = false;
-        try   { Engine.SEARCH(s, P, exc: true); }
-        catch (F) { ok = true; }
-        Report(lbl, ok);
+    public static void Throws(string l,string s,PATTERN P) {
+        bool ok=false;
+        try { Engine.SEARCH(s,P,exc:true); } catch(F){ok=true;}
+        Rep(l,ok);
     }
-
-    static void Report(string lbl, bool ok)
-    {
-        if (ok) _pass++; else _fail++;
-        Console.WriteLine($"  {(ok ? "PASS" : "FAIL")}  {lbl}");
+    static void Rep(string l,bool ok) {
+        if(ok)_pass++;else _fail++;
+        Console.WriteLine($"  {(ok?"PASS":"FAIL")}  {l}");
     }
-
     public static void Summary() => Console.WriteLine($"\n=== {_pass} passed, {_fail} failed ===");
-    public static void Section(string title) => Console.WriteLine($"\n── {title} ──");
+    public static void Section(string t) => Console.WriteLine($"\n── {t} ──");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Tests  —  all call sites now use factory syntax, no  new X()  anywhere
+// Tests
 // ═════════════════════════════════════════════════════════════════════════════
 
 class Program
 {
+    const string DIGITS = "0123456789";
+    const string UCASE  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    const string LCASE  = "abcdefghijklmnopqrstuvwxyz";
+    const string ALPHA  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const string ALNUM  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
     static void Main()
     {
-        Console.WriteLine("=== SNOBOL4cs V3  —  factory functions ===");
+        Console.WriteLine("=== SNOBOL4cs V5  —  Stage 4: ANY · NOTANY · SPAN · NSPAN · BREAK · BREAKX ===");
 
-        Test_ε();
-        Test_FAIL();
-        Test_ABORT();
-        Test_SUCCEED();
-        Test_π();
-        Test_α();
-        Test_ω();
-        Test_FENCE_variable();
-        Test_FENCE_function();
-        Test_BEAD();
+        Test_ANY();
+        Test_NOTANY();
+        Test_SPAN();
+        Test_NSPAN();
+        Test_BREAK();
+        Test_BREAKX();
+        Test_identifier();      // test_01.py identifier pattern
+        Test_real_number();     // test_01.py real_number pattern
+        Test_BEAD();            // V1 regression
 
         T.Summary();
     }
 
-    // ── ε ─────────────────────────────────────────────────────────────────────
-    static void Test_ε()
+    // ── ANY ───────────────────────────────────────────────────────────────────
+    // ANY(chars) matches exactly one character that appears in chars.
+    static void Test_ANY()
     {
-        T.Section("ε (epsilon)");
-        T.Match   ("ε fullmatches \"\"",                         "",    ε());
-        T.NoMatch ("ε does not fullmatch \"a\"",                 "a",   ε());
-        T.Slice   ("SEARCH finds ε at [0:0] in \"hi\"",          "hi",  ε(), 0, 0);
-        T.Match   ("POS(0)+ε+σ(x)+RPOS(0) matches \"x\"",       "x",   POS(0) + ε() + σ("x") + RPOS(0));
-        T.NoMatch ("POS(0)+ε+σ(x)+RPOS(0) no match \"y\"",      "y",   POS(0) + ε() + σ("x") + RPOS(0));
+        T.Section("ANY(chars)");
+
+        // Basic single-char match
+        T.Slice  ("ANY(abc) at 'a' = [0:1]",           "abc",   ANY("abc"), 0, 1);
+        T.Found  ("ANY(digits) finds digit in \"a3b\"", "a3b",  ANY(DIGITS));
+        T.NotFound("ANY(digits) not in \"abc\"",        "abc",  ANY(DIGITS));
+
+        // ANY matches exactly one char
+        T.Match  ("ANY(abc) fullmatches \"a\"",          "a",    ANY("abc"));
+        T.NoMatch("ANY(abc) no match \"ab\"",            "ab",   ANY("abc"));
+        T.NoMatch("ANY(abc) no match \"\"",              "",     ANY("abc"));
+        T.NoMatch("ANY(abc) no match \"x\"",             "x",    ANY("abc"));
+
+        // ANY in sequence
+        T.Match  ("ANY(+-)+SPAN(digits) matches \"+42\"", "+42",
+                  POS(0)+ANY("+-")+SPAN(DIGITS)+RPOS(0));
+        T.Match  ("ANY(+-)+SPAN(digits) matches \"-7\"",  "-7",
+                  POS(0)+ANY("+-")+SPAN(DIGITS)+RPOS(0));
     }
 
-    // ── FAIL ──────────────────────────────────────────────────────────────────
-    static void Test_FAIL()
+    // ── NOTANY ────────────────────────────────────────────────────────────────
+    // NOTANY(chars) matches exactly one character that does NOT appear in chars.
+    static void Test_NOTANY()
     {
-        T.Section("FAIL");
-        T.NotFound("FAIL finds nothing in \"\"",                 "",    FAIL());
-        T.NotFound("FAIL finds nothing in \"abc\"",              "abc", FAIL());
-        T.Match   ("FAIL|σ(ok) matches \"ok\"",                  "ok",  POS(0) + (FAIL() | σ("ok")) + RPOS(0));
-        T.NoMatch ("FAIL|σ(ok) no match \"no\"",                 "no",  POS(0) + (FAIL() | σ("ok")) + RPOS(0));
-        T.NoMatch ("σ(a)+FAIL no match \"a\"",                   "a",   POS(0) + σ("a") + FAIL() + RPOS(0));
+        T.Section("NOTANY(chars)");
+
+        T.Match  ("NOTANY(digits) fullmatches \"a\"",    "a",    NOTANY(DIGITS));
+        T.NoMatch("NOTANY(digits) no match \"3\"",       "3",    NOTANY(DIGITS));
+        T.NoMatch("NOTANY(digits) no match \"\"",        "",     NOTANY(DIGITS));
+
+        // NOTANY in sequence: one non-digit followed by digits
+        T.Match  ("NOTANY(digits)+SPAN(digits) = \"a3\"","a3",
+                  POS(0)+NOTANY(DIGITS)+SPAN(DIGITS)+RPOS(0));
+
+        // Complement relationship: ANY(x)|NOTANY(x) covers all single chars
+        T.Match  ("ANY(a)|NOTANY(a) matches any char \"b\"","b",
+                  POS(0)+(ANY("a")|NOTANY("a"))+RPOS(0));
+        T.Match  ("ANY(a)|NOTANY(a) matches char \"a\"",    "a",
+                  POS(0)+(ANY("a")|NOTANY("a"))+RPOS(0));
     }
 
-    // ── ABORT ─────────────────────────────────────────────────────────────────
-    static void Test_ABORT()
+    // ── SPAN ──────────────────────────────────────────────────────────────────
+    // SPAN(chars) matches one-or-more characters from chars. Fails on empty.
+    static void Test_SPAN()
     {
-        T.Section("ABORT");
-        T.NotFound("ABORT returns null (exc=false)",             "abc", ABORT());
-        T.Throws  ("ABORT raises F (exc=true) in \"abc\"",       "abc", POS(0) + ABORT());
-        T.NotFound("ABORT|σ(x) aborts, no match",               "x",   ABORT() | σ("x"));
+        T.Section("SPAN(chars)");
+
+        T.Slice  ("SPAN(digits) in \"123abc\" = [0:3]",  "123abc", SPAN(DIGITS), 0, 3);
+        T.Match  ("SPAN(digits) fullmatches \"0123\"",   "0123",   SPAN(DIGITS));
+        T.NoMatch("SPAN(digits) no match \"abc\"",       "abc",    SPAN(DIGITS));
+        T.NoMatch("SPAN(digits) no match \"\"",          "",       SPAN(DIGITS));
+
+        // SPAN requires at least one char — not same as NSPAN
+        T.NotFound("SPAN(digits) not found in all-alpha","abcde",  SPAN(DIGITS));
+
+        // SPAN is greedy and non-backtracking: consumes all matching chars at once
+        // σ("12")+RPOS(0) after SPAN(digits) on "123" — SPAN took "123", σ("12") fails
+        T.NoMatch("SPAN greedy: takes all digits, σ(12) can't match after","123",
+                  POS(0)+SPAN(DIGITS)+σ("12")+RPOS(0));
+
+        // But SPAN followed by more of the same — use in sequence
+        T.Match  ("SPAN(alpha)+SPAN(digits) matches \"abc123\"","abc123",
+                  POS(0)+SPAN(ALPHA)+SPAN(DIGITS)+RPOS(0));
     }
 
-    // ── SUCCEED ───────────────────────────────────────────────────────────────
-    static void Test_SUCCEED()
+    // ── NSPAN ─────────────────────────────────────────────────────────────────
+    // NSPAN(chars) matches zero-or-more chars from set. Never fails.
+    static void Test_NSPAN()
     {
-        T.Section("SUCCEED");
-        T.Slice   ("SEARCH(\"hi\", SUCCEED()) = [0:0]",          "hi",  SUCCEED(), 0, 0);
-        T.Match   ("SUCCEED() fullmatches \"\"",                  "",    SUCCEED());
-        T.NotFound("SUCCEED+FENCE() aborts entire search",        "ab",  SUCCEED() + FENCE() + σ("b"));
+        T.Section("NSPAN(chars)");
+
+        // Zero-length match when no chars match
+        T.Slice  ("NSPAN(digits) on \"abc\" = [0:0]",   "abc",    NSPAN(DIGITS), 0, 0);
+
+        // Consumes all matching chars
+        T.Slice  ("NSPAN(digits) on \"123abc\" = [0:3]","123abc", NSPAN(DIGITS), 0, 3);
+
+        // NSPAN never fails — fullmatches anything via zero-length match
+        T.Match  ("NSPAN(digits) fullmatches \"\"",     "",       NSPAN(DIGITS));
+        T.Match  ("NSPAN(digits) fullmatches \"123\"",  "123",    NSPAN(DIGITS));
+
+        // Optional prefix: NSPAN(alpha) + SPAN(digits)
+        T.Match  ("NSPAN(alpha)+SPAN(digits) matches \"abc123\"","abc123",
+                  POS(0)+NSPAN(ALPHA)+SPAN(DIGITS)+RPOS(0));
+        T.Match  ("NSPAN(alpha)+SPAN(digits) matches \"123\"","123",
+                  POS(0)+NSPAN(ALPHA)+SPAN(DIGITS)+RPOS(0));
+
+        // Difference from SPAN: NSPAN succeeds on empty, SPAN does not
+        T.Found  ("NSPAN(digits) found (empty) in all-alpha","abcde", NSPAN(DIGITS));
+        T.NotFound("SPAN(digits) NOT found in all-alpha",    "abcde", SPAN(DIGITS));
     }
 
-    // ── π (optional) ─────────────────────────────────────────────────────────
-    static void Test_π()
+    // ── BREAK ─────────────────────────────────────────────────────────────────
+    // BREAK(chars) scans forward until a char in chars is found.
+    // Fails if end-of-string is reached without finding the break char.
+    // Yields the scanned prefix (may be zero-length if break char is at pos0).
+    static void Test_BREAK()
     {
-        T.Section("π (optional, ~P)");
-        PATTERN opt_s = POS(0) + σ("cat") + ~σ("s") + RPOS(0);
-        T.Match   ("σ(cat)+~σ(s) matches \"cats\"",              "cats", opt_s);
-        T.Match   ("σ(cat)+~σ(s) matches \"cat\"",               "cat",  opt_s);
-        T.NoMatch ("σ(cat)+~σ(s) no match \"ca\"",               "ca",   opt_s);
-        T.Match   ("~ε fullmatches \"\"",                         "",     POS(0) + ~ε() + RPOS(0));
+        T.Section("BREAK(chars)");
 
-        PATTERN sign = ~(σ("+") | σ("-"));
-        PATTERN P    = POS(0) + sign + σ("1") + RPOS(0);
-        T.Match   ("~(+|-)+σ(1) matches \"+1\"",                 "+1",   P);
-        T.Match   ("~(+|-)+σ(1) matches \"-1\"",                 "-1",   P);
-        T.Match   ("~(+|-)+σ(1) matches \"1\"",                  "1",    P);
-        T.NoMatch ("~(+|-)+σ(1) no match \"x1\"",                "x1",   P);
+        // Basic: scan up to colon
+        T.Slice  ("BREAK(:) in \"key:val\" = [0:3]",    "key:val", BREAK(":"), 0, 3);
+
+        // Zero-length match: break char is right at current pos
+        T.Slice  ("BREAK(:) at start of \":val\" = [0:0]",":val",  BREAK(":"), 0, 0);
+
+        // Fail: no break char present
+        T.NotFound("BREAK(:) not found in \"nocolon\"", "nocolon", BREAK(":"));
+
+        // BREAK then consume the delimiter with ANY
+        T.Match  ("BREAK(:)+ANY(:)+REM matches \"key:val\"","key:val",
+                  POS(0)+BREAK(":")+ANY(":")+REM()+RPOS(0));
+
+        // BREAK is non-backtracking: yields exactly once
+        // After BREAK consumes prefix, there's no retry with shorter prefix
+        T.Found  ("BREAK(.) in \"a.b.c\" finds \"a\"",  "a.b.c",
+                  POS(0)+BREAK(".")+ANY(".")+σ("b"));
     }
 
-    // ── α (BOL) ───────────────────────────────────────────────────────────────
-    static void Test_α()
+    // ── BREAKX ────────────────────────────────────────────────────────────────
+    // BREAKX is an alias for BREAK in the pure backend.
+    static void Test_BREAKX()
     {
-        T.Section("α (BOL anchor)");
-        T.Match   ("α+σ(hi) matches \"hi\"",                     "hi",       α() + σ("hi") + RPOS(0));
-        T.NoMatch ("α+σ(hi) no match \" hi\"",                   " hi",      α() + σ("hi") + RPOS(0));
-        T.Found   ("α+σ(two) found in \"one\\ntwo\"",            "one\ntwo", α() + σ("two"));
-        T.NotFound("α+σ(xxx) not found in \"one\\ntwo\"",        "one\ntwo", α() + σ("xxx"));
-        T.NotFound("α not in middle of line",                    "onetwo",   σ("one") + α());
+        T.Section("BREAKX(chars) — alias for BREAK");
+
+        T.Slice  ("BREAKX(:) in \"key:val\" = [0:3]",   "key:val", BREAKX(":"), 0, 3);
+        T.NotFound("BREAKX(:) not found in \"nocolon\"","nocolon", BREAKX(":"));
+        T.Match  ("BREAKX(:)+ANY(:)+REM matches \"k:v\"","k:v",
+                  POS(0)+BREAKX(":")+ANY(":")+REM()+RPOS(0));
     }
 
-    // ── ω (EOL) ───────────────────────────────────────────────────────────────
-    static void Test_ω()
+    // ── identifier pattern (from test_01.py) ──────────────────────────────────
+    // A SNOBOL4 identifier: starts with a letter, followed by letters or digits.
+    // Python test_01.py: identifier = POS(0) + ANY(UCASE+LCASE) + NSPAN(UCASE+LCASE+DIGITS) + RPOS(0)
+    static void Test_identifier()
     {
-        T.Section("ω (EOL anchor)");
-        T.Found   ("σ(hi)+ω found in \"hi\"",                    "hi",       σ("hi") + ω());
-        T.Found   ("σ(hi)+ω found in \"hi\\nthere\"",            "hi\nthere",σ("hi") + ω());
-        T.Found   ("σ(one)+ω found in \"one\\ntwo\"",            "one\ntwo", σ("one") + ω());
-        T.NotFound("σ(on)+ω not found in \"one\"",               "one",      σ("on") + ω());
-        T.Found   ("σ(end)+ω at true end",                       "the end",  σ("end") + ω());
+        T.Section("identifier (test_01.py)");
+
+        PATTERN identifier = POS(0) + ANY(ALPHA) + NSPAN(ALNUM) + RPOS(0);
+
+        string[] yes = { "a", "A", "abc", "Hello", "x1", "CamelCase", "abc123", "X99" };
+        string[] no  = { "", "1abc", "_abc", "123", " abc", "abc def" };
+
+        foreach (var s in yes) T.Match  ($"identifier \"{s}\"", s, identifier);
+        foreach (var s in no)  T.NoMatch($"not identifier \"{s}\"", s, identifier);
     }
 
-    // ── FENCE() — commit point ────────────────────────────────────────────────
-    static void Test_FENCE_variable()
+    // ── real_number pattern (from test_01.py) ─────────────────────────────────
+    // A real number: optional sign, digits, optional decimal part.
+    // Python test_01.py:
+    //   real_number = POS(0) + ANY("+-") (optional) + SPAN(DIGITS)
+    //               + (σ(".") + NSPAN(DIGITS)) (optional) + RPOS(0)
+    static void Test_real_number()
     {
-        T.Section("FENCE() — commit point");
-        T.Match   ("without FENCE: σ(a)|σ(ab) matches \"ab\"",   "ab",
-                   POS(0) + (σ("a") | σ("ab")) + RPOS(0));
-        T.NoMatch ("with FENCE: σ(a)+FENCE()|σ(ab) aborts on \"ab\"", "ab",
-                   POS(0) + (σ("a") + FENCE() | σ("ab")) + RPOS(0));
-        T.Match   ("σ(ok)+FENCE() matches \"ok\" cleanly",       "ok",
-                   POS(0) + σ("ok") + FENCE() + RPOS(0));
-    }
+        T.Section("real_number (test_01.py)");
 
-    // ── FENCE(P) — function form ──────────────────────────────────────────────
-    static void Test_FENCE_function()
-    {
-        T.Section("FENCE(P) — function form");
-        PATTERN P = POS(0) + FENCE(σ("a") | σ("ab")) + RPOS(0);
-        T.Match   ("FENCE(σ(a)|σ(ab)) matches \"a\"",            "a",  P);
-        T.Match   ("FENCE(P) still yields all of P alternatives", "ab", P);
-        PATTERN Q = POS(0) + (FENCE(σ("a")) | σ("xy")) + RPOS(0);
-        T.Match   ("FENCE(σ(a))|σ(xy) outer-alt still works on \"xy\"", "xy", Q);
+        PATTERN real_number =
+              POS(0)
+            + ~ANY("+-")
+            + SPAN(DIGITS)
+            + ~(σ(".") + NSPAN(DIGITS))
+            + RPOS(0);
+
+        string[] yes = { "0", "42", "3.14", "+7", "-3", "+3.14", "-0.5", "100.", "007" };
+        string[] no  = { "", ".", "+", "abc", "1.2.3", " 3", "3 .14" };
+
+        foreach (var s in yes) T.Match  ($"real \"{s}\"", s, real_number);
+        foreach (var s in no)  T.NoMatch($"not real \"{s}\"", s, real_number);
     }
 
     // ── BEAD regression ───────────────────────────────────────────────────────
     static void Test_BEAD()
     {
         T.Section("BEAD regression");
-
         PATTERN test_one =
               POS(0)
-            + Π(σ("B"), σ("F"), σ("L"), σ("R"))
-            + Π(σ("E"), σ("EA"))
-            + Π(σ("D"), σ("DS"))
+            + Π(σ("B"),σ("F"),σ("L"),σ("R"))
+            + Π(σ("E"),σ("EA"))
+            + Π(σ("D"),σ("DS"))
             + RPOS(0);
-
-        string[] yes = {
-            "BED","FED","LED","RED",
-            "BEAD","FEAD","LEAD","READ",
-            "BEDS","FEDS","LEDS","REDS",
-            "BEADS","FEADS","LEADS","READS",
-        };
-        string[] no = { "BID", "BREAD", "ED", "BEDSS", "" };
-
-        foreach (var w in yes) T.Match  ($"BEAD matches \"{w}\"",    w, test_one);
-        foreach (var w in no)  T.NoMatch($"BEAD no match \"{w}\"",   w, test_one);
+        string[] yes={"BED","FED","LED","RED","BEAD","FEAD","LEAD","READ",
+                      "BEDS","FEDS","LEDS","REDS","BEADS","FEADS","LEADS","READS"};
+        string[] no ={"BID","BREAD","ED","BEDSS",""};
+        foreach (var w in yes) T.Match  ($"BEAD \"{w}\"",w,test_one);
+        foreach (var w in no)  T.NoMatch($"BEAD \"{w}\"",w,test_one);
     }
 }
