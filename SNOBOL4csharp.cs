@@ -1,28 +1,76 @@
-// SNOBOL4cs_v6.cs  —  SNOBOL4 pattern engine in C#, Version 6
+// SNOBOL4cs_v7.cs  —  SNOBOL4 pattern engine in C#, Version 7
 //
-// Stage 5 — Repetition + Balanced:
-//   ARBNO(P)   zero-or-more repetitions of P, shortest first
-//   MARBNO(P)  alias for ARBNO
-//   BAL        match one balanced parenthesised token (yields multiple times)
+// Stage 6 — Assignment and predicate patterns + Env singleton:
 //
-// Carried forward unchanged from V5:
-//   σ Σ Π π POS RPOS ε FAIL ABORT SUCCEED α ω FENCE
-//   LEN TAB RTAB REM ARB MARB
-//   ANY NOTANY SPAN NSPAN BREAK BREAKX
+//   Env          Static singleton holding Dictionary<string,object> — the single
+//                flat SNOBOL variable space.  Holds captured strings, cursor
+//                positions, AND pattern objects (needed by ζ for forward refs).
+//                GLOBALS(dict) registers it.
+//
+//   δ(P, name)   Immediate match assignment  (SNOBOL4: P $ N)
+//                Writes env[name] = matched substring on every yield from P.
+//                Permanent — not rolled back on backtrack.
+//
+//   Δ(P, name)   Conditional match assignment  (SNOBOL4: P . N)
+//   P % "name"   Same via operator.
+//                Defers write until whole match succeeds; rolled back otherwise.
+//
+//   Θ(name)      Immediate cursor assignment  — writes cursor position now.
+//   θ(name)      Conditional cursor assignment — defers until success.
+//
+//   Λ(func)      Immediate predicate — Func<bool>, yields iff true.
+//   λ(action)    Conditional action  — Action, fires after whole match succeeds.
+//
+//   ζ(name)      Deferred pattern reference — looks up env[name] as a PATTERN
+//                at match time.  Enables forward references and recursive grammars.
+//
+// MatchState gains List<Action> cstack.
+// Engine.SEARCH executes cstack actions after first successful yield.
 // ─────────────────────────────────────────────────────────────────────────────
 
 using System;
 using System.Collections.Generic;
 using static S4;
 
+// ── F ─────────────────────────────────────────────────────────────────────────
 sealed class F : Exception { public F(string m) : base(m) {} }
 
+// ── Env — the single flat SNOBOL variable space ───────────────────────────────
+//
+// Holds everything the patterns and caller share:
+//   • Captured string values written by δ / Δ
+//   • Cursor positions written by Θ / θ
+//   • PATTERN objects stored by name for ζ forward references
+//
+// Must be registered before matching via GLOBALS(dict).
+// Using a Dictionary<string,object> mirrors Python's module globals() exactly.
+
+static class Env
+{
+    static Dictionary<string,object>? _g;
+
+    public static void GLOBALS(Dictionary<string,object> g) => _g = g;
+
+    public static Dictionary<string,object> G =>
+        _g ?? throw new InvalidOperationException(
+            "GLOBALS(dict) has not been called before matching.");
+
+    public static void   Set(string k, object v)  => G[k] = v;
+    public static object Get(string k)            => G.TryGetValue(k, out var v) ? v
+        : throw new KeyNotFoundException($"SNOBOL env: '{k}' not found");
+    public static bool   Has(string k)            => _g != null && _g.ContainsKey(k);
+}
+
+// ── MatchState — carries cstack for deferred conditional actions ──────────────
 sealed class MatchState
 {
-    public int pos; public string subject;
+    public int          pos;
+    public string       subject;
+    public List<Action> cstack = new();
     public MatchState(int p, string s) { pos=p; subject=s; }
 }
 
+// ── Ϣ — match-state stack ────────────────────────────────────────────────────
 static class Ϣ
 {
     static readonly Stack<MatchState> _s = new();
@@ -31,6 +79,7 @@ static class Ϣ
     public static MatchState Top                => _s.Peek();
 }
 
+// ── Slice ─────────────────────────────────────────────────────────────────────
 readonly struct Slice
 {
     public readonly int Start, Stop;
@@ -38,9 +87,11 @@ readonly struct Slice
     public override string ToString() => $"[{Start}:{Stop}]";
 }
 
+// ── PATTERN — base class ──────────────────────────────────────────────────────
 abstract class PATTERN
 {
     public abstract IEnumerable<Slice> γ();
+
     public static PATTERN operator +(PATTERN p, PATTERN q) {
         if (p is _Σ ps) { var a=new PATTERN[ps._AP.Length+1]; ps._AP.CopyTo(a,0); a[ps._AP.Length]=q; return new _Σ(a); }
         return new _Σ(p,q);
@@ -50,9 +101,14 @@ abstract class PATTERN
         return new _Π(p,q);
     }
     public static PATTERN operator ~(PATTERN p) => new _π(p);
+
+    // P % "name"  →  Δ(P, "name")   conditional assignment operator
+    public static PATTERN operator %(PATTERN p, string name) => new _Δ(p, name);
 }
 
-// ── V5 carry-forward ──────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// V6 carry-forward (condensed)
+// ═════════════════════════════════════════════════════════════════════════════
 
 sealed class _σ : PATTERN {
     readonly string _s; public _σ(string s){_s=s;}
@@ -169,14 +225,12 @@ sealed class _ARB : PATTERN {
     }
 }
 sealed class _MARB : PATTERN {
-    readonly _ARB _arb=new();
-    public override IEnumerable<Slice> γ() => _arb.γ();
-}
+    readonly _ARB _a=new(); public override IEnumerable<Slice> γ() => _a.γ(); }
 sealed class _ANY : PATTERN {
     readonly string _c; public _ANY(string c){_c=c;}
     public override IEnumerable<Slice> γ() {
         var st=Ϣ.Top;
-        if (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])>=0)
+        if (st.pos<st.subject.Length&&_c.IndexOf(st.subject[st.pos])>=0)
             { int p=st.pos; st.pos++; yield return new Slice(p,st.pos); st.pos=p; }
     }
 }
@@ -184,7 +238,7 @@ sealed class _NOTANY : PATTERN {
     readonly string _c; public _NOTANY(string c){_c=c;}
     public override IEnumerable<Slice> γ() {
         var st=Ϣ.Top;
-        if (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])<0)
+        if (st.pos<st.subject.Length&&_c.IndexOf(st.subject[st.pos])<0)
             { int p=st.pos; st.pos++; yield return new Slice(p,st.pos); st.pos=p; }
     }
 }
@@ -192,7 +246,7 @@ sealed class _SPAN : PATTERN {
     readonly string _c; public _SPAN(string c){_c=c;}
     public override IEnumerable<Slice> γ() {
         var st=Ϣ.Top; int p=st.pos;
-        while (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])>=0) st.pos++;
+        while (st.pos<st.subject.Length&&_c.IndexOf(st.subject[st.pos])>=0) st.pos++;
         if (st.pos>p) { yield return new Slice(p,st.pos); st.pos=p; }
     }
 }
@@ -200,7 +254,7 @@ sealed class _NSPAN : PATTERN {
     readonly string _c; public _NSPAN(string c){_c=c;}
     public override IEnumerable<Slice> γ() {
         var st=Ϣ.Top; int p=st.pos;
-        while (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])>=0) st.pos++;
+        while (st.pos<st.subject.Length&&_c.IndexOf(st.subject[st.pos])>=0) st.pos++;
         yield return new Slice(p,st.pos); st.pos=p;
     }
 }
@@ -208,7 +262,7 @@ sealed class _BREAK : PATTERN {
     readonly string _c; public _BREAK(string c){_c=c;}
     public override IEnumerable<Slice> γ() {
         var st=Ϣ.Top; int p=st.pos;
-        while (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])<0) st.pos++;
+        while (st.pos<st.subject.Length&&_c.IndexOf(st.subject[st.pos])<0) st.pos++;
         if (st.pos<st.subject.Length) { yield return new Slice(p,st.pos); st.pos=p; }
     }
 }
@@ -216,153 +270,180 @@ sealed class _BREAKX : PATTERN {
     readonly _BREAK _b; public _BREAKX(string c){_b=new _BREAK(c);}
     public override IEnumerable<Slice> γ() => _b.γ();
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Stage 5 — new implementations
-// ═════════════════════════════════════════════════════════════════════════════
-
-// ── _ARBNO — zero-or-more repetitions of P, shortest first ───────────────────
-//
-// Python:
-//   cursor = 0
-//   Ag = []
-//   while cursor >= 0:
-//       if cursor >= len(Ag):           ← all active generators succeeded
-//           yield slice(pos0, pos)      ← offer current extent
-//       if cursor >= len(Ag):
-//           Ag.append(P.γ())            ← add one more repetition
-//       try:
-//           next(Ag[cursor])            ← advance that repetition
-//           cursor += 1                 ← success: try one more
-//       except StopIteration:
-//           cursor -= 1                 ← backtrack: last rep exhausted
-//           Ag.pop()
-//
-// The key insight: `next(Ag[cursor])` advances pos as a side-effect.
-// We only need to know if P succeeded (moved the cursor), not what it matched.
-// After yield, the surrounding Σ may backtrack into us; we resume the while
-// loop and try extending by one more repetition — or, if the last one is
-// exhausted, we pop and try a shorter prefix.
-//
-// In C# we use a List<IEnumerator<Slice>> as the dynamic generator array.
-
-sealed class _ARBNO : PATTERN
-{
-    readonly PATTERN _P;
-    public _ARBNO(PATTERN p) { _P = p; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        var st   = Ϣ.Top;
-        int pos0 = st.pos;
-
-        var Ag = new List<IEnumerator<Slice>>();
-        int cursor = 0;
-
-        while (cursor >= 0)
-        {
-            // All generators up to cursor have succeeded once — yield current span
-            if (cursor >= Ag.Count)
-            {
-                yield return new Slice(pos0, st.pos);
-                // After yield: backtracking requested, try one more repetition
-            }
-
-            // Extend Ag if needed
-            if (cursor >= Ag.Count)
-                Ag.Add(_P.γ().GetEnumerator());
-
-            // Advance this repetition's generator
-            if (Ag[cursor].MoveNext())
-            {
-                cursor++;           // succeeded: go deeper
-            }
-            else
-            {
-                Ag[cursor].Dispose();
-                Ag.RemoveAt(cursor);
-                cursor--;           // failed: backtrack
-            }
+sealed class _ARBNO : PATTERN {
+    readonly PATTERN _P; public _ARBNO(PATTERN p){_P=p;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int pos0=st.pos;
+        var Ag=new List<IEnumerator<Slice>>(); int cursor=0;
+        while (cursor>=0) {
+            if (cursor>=Ag.Count) { yield return new Slice(pos0,st.pos); }
+            if (cursor>=Ag.Count) Ag.Add(_P.γ().GetEnumerator());
+            if (Ag[cursor].MoveNext()) cursor++;
+            else { Ag[cursor].Dispose(); Ag.RemoveAt(cursor); cursor--; }
         }
-
-        // Clean up any remaining enumerators
         foreach (var e in Ag) e.Dispose();
     }
-
-    public override string ToString() => $"ARBNO(...)";
 }
-
-// ── _MARBNO — alias for ARBNO ─────────────────────────────────────────────────
-
-sealed class _MARBNO : PATTERN
-{
-    readonly _ARBNO _a;
-    public _MARBNO(PATTERN p) { _a = new _ARBNO(p); }
+sealed class _MARBNO : PATTERN {
+    readonly _ARBNO _a; public _MARBNO(PATTERN p){_a=new _ARBNO(p);}
     public override IEnumerable<Slice> γ() => _a.γ();
-    public override string ToString() => "MARBNO(...)";
+}
+sealed class _BAL : PATTERN {
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int pos0=st.pos; int nest=0;
+        st.pos++;
+        while (st.pos<=st.subject.Length) {
+            char ch=st.subject[st.pos-1];
+            if      (ch=='(') nest++;
+            else if (ch==')') nest--;
+            if      (nest< 0)                             break;
+            else if (nest> 0&&st.pos>=st.subject.Length)  break;
+            else if (nest==0) yield return new Slice(pos0,st.pos);
+            st.pos++;
+        }
+        st.pos=pos0;
+    }
 }
 
-// ── _BAL — match one balanced parenthesised token ────────────────────────────
-//
-// Python:
-//   pos0 = pos; nest = 0
-//   pos += 1                        ← consume the first character unconditionally
-//   while pos <= len(subject):
-//       ch = subject[pos-1]         ← look at char we just advanced past
-//       if ch == '(':  nest += 1
-//       if ch == ')':  nest -= 1
-//       if nest < 0:   break        ← unmatched ')' — stop
-//       elif nest > 0 and pos >= len(subject): break   ← unclosed '(' — stop
-//       elif nest == 0: yield slice(pos0, pos)          ← balanced point
-//       pos += 1
-//   pos = pos0
-//
-// BAL advances pos by 1 before the first check, so it always consumes at least
-// one character. It yields at every point where nesting depth returns to 0.
-// This means it can yield multiple times (with increasing lengths).
-//
-// Example on "(a)(b)":
-//   pos=0: advance to 1, ch='(' → nest=1; advance to 2, ch='a' → nest=1;
-//          advance to 3, ch=')' → nest=0, yield [0:3]; advance to 4, ch='('...
-//   ... eventually also yields [0:6] for the full "(a)(b)".
-//
-// On "(a+b)":
-//   yields [0:5] when the outer ')' brings nest back to 0.
-//
-// BAL on a bare token like "abc" (no parens):
-//   pos=0: advance to 1, ch='a' → nest=0, yield [0:1];
-//          advance to 2, ch='b' → nest=0, yield [0:2]; etc.
-//   So BAL on a non-paren char yields each prefix.
+// ═════════════════════════════════════════════════════════════════════════════
+// Stage 6 — new implementations
+// ═════════════════════════════════════════════════════════════════════════════
 
-sealed class _BAL : PATTERN
+// ── _δ — immediate match assignment (SNOBOL4: P $ N) ─────────────────────────
+//
+// Writes env[N] = matched substring on every yield from P.
+// Permanent — not rolled back when backtracking resumes the generator.
+// Python: for _1 in P.γ(): _env._g[N] = STRING(subject[_1]); yield _1
+
+sealed class _δ : PATTERN
 {
+    readonly PATTERN _P; readonly string _N;
+    public _δ(PATTERN p, string n) { _P=p; _N=n; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        foreach (var sl in _P.γ()) {
+            Env.Set(_N, Ϣ.Top.subject.Substring(sl.Start, sl.Stop-sl.Start));
+            yield return sl;
+        }
+    }
+}
+
+// ── _Δ — conditional match assignment (SNOBOL4: P . N) ───────────────────────
+//
+// Pushes a closure onto cstack before yielding; pops it on backtrack.
+// SEARCH executes cstack only after the whole match succeeds.
+// Python: cstack.append(f"{N}=STRING(subject[s:e])"); yield; cstack.pop()
+
+sealed class _Δ : PATTERN
+{
+    readonly PATTERN _P; readonly string _N;
+    public _Δ(PATTERN p, string n) { _P=p; _N=n; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top;
+        foreach (var sl in _P.γ()) {
+            var captured = st.subject.Substring(sl.Start, sl.Stop-sl.Start);
+            var name     = _N;
+            Action act   = () => Env.Set(name, captured);
+            st.cstack.Add(act);
+            yield return sl;
+            st.cstack.RemoveAt(st.cstack.Count-1);
+        }
+    }
+}
+
+// ── _Θ — immediate cursor assignment ─────────────────────────────────────────
+//
+// Writes env[N] = current cursor position immediately, permanently.
+// Python: _env._g[N] = Ϣ[-1].pos; yield slice(pos,pos)  [no pop]
+
+sealed class _Θ : PATTERN
+{
+    readonly string _N; public _Θ(string n){_N=n;}
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top;
+        Env.Set(_N, st.pos);
+        yield return new Slice(st.pos, st.pos);
+    }
+}
+
+// ── _θ — conditional cursor assignment ───────────────────────────────────────
+//
+// Defers env[N] = cursor position until whole match succeeds.
+// Python: cstack.append(f"{N}={pos}"); yield; cstack.pop()
+
+sealed class _θ : PATTERN
+{
+    readonly string _N; public _θ(string n){_N=n;}
+
     public override IEnumerable<Slice> γ()
     {
         var st   = Ϣ.Top;
-        int pos0 = st.pos;
-        int nest = 0;
-
-        st.pos++;   // advance one character unconditionally
-
-        while (st.pos <= st.subject.Length)
-        {
-            char ch = st.subject[st.pos - 1];   // char we just advanced past
-
-            if      (ch == '(') nest++;
-            else if (ch == ')') nest--;
-
-            if      (nest <  0)                                   break;  // unmatched ')'
-            else if (nest >  0 && st.pos >= st.subject.Length)   break;  // unclosed '('
-            else if (nest == 0)
-                yield return new Slice(pos0, st.pos);                     // balanced
-
-            st.pos++;
-        }
-
-        st.pos = pos0;   // restore cursor on backtrack
+        var pos  = st.pos;
+        var name = _N;
+        Action act = () => Env.Set(name, pos);
+        st.cstack.Add(act);
+        yield return new Slice(st.pos, st.pos);
+        st.cstack.RemoveAt(st.cstack.Count-1);
     }
+}
 
-    public override string ToString() => "BAL()";
+// ── _Λ — immediate predicate ──────────────────────────────────────────────────
+//
+// Calls test() right now; yields a zero-length match iff truthy.
+// Python: if callable(expr) and expr(): yield slice(pos,pos)
+
+sealed class _Λ : PATTERN
+{
+    readonly Func<bool> _test; public _Λ(Func<bool> t){_test=t;}
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top;
+        if (_test()) yield return new Slice(st.pos, st.pos);
+    }
+}
+
+// ── _λ — conditional action ───────────────────────────────────────────────────
+//
+// Defers action until whole match succeeds.
+// Python: cstack.append(callable); yield; cstack.pop()
+
+sealed class _λ : PATTERN
+{
+    readonly Action _cmd; public _λ(Action c){_cmd=c;}
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st = Ϣ.Top;
+        st.cstack.Add(_cmd);
+        yield return new Slice(st.pos, st.pos);
+        st.cstack.RemoveAt(st.cstack.Count-1);
+    }
+}
+
+// ── _ζ — deferred pattern reference ──────────────────────────────────────────
+//
+// Looks up env[name] as a PATTERN at match time.
+// Enables forward references and recursive grammars:
+//   G["X"] = somePattern;
+//   var P = σ("(") + ζ("X") + σ(")");   // ζ resolves X when match runs
+//
+// Python: P = _env._g[N]; yield from P.γ()
+
+sealed class _ζ : PATTERN
+{
+    readonly string _N; public _ζ(string n){_N=n;}
+
+    public override IEnumerable<Slice> γ()
+    {
+        var P = (PATTERN)Env.Get(_N);
+        foreach (var s in P.γ()) yield return s;
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -371,7 +452,7 @@ sealed class _BAL : PATTERN
 
 static class S4
 {
-    // V5 carry-forward
+    // V6 carry-forward
     public static PATTERN Σ(params PATTERN[] ap)  => new _Σ(ap);
     public static PATTERN Π(params PATTERN[] ap)  => new _Π(ap);
     public static PATTERN π(PATTERN p)            => new _π(p);
@@ -398,26 +479,40 @@ static class S4
     public static PATTERN NSPAN(string c)         => new _NSPAN(c);
     public static PATTERN BREAK(string c)         => new _BREAK(c);
     public static PATTERN BREAKX(string c)        => new _BREAKX(c);
-    // Stage 5
     public static PATTERN ARBNO(PATTERN p)        => new _ARBNO(p);
     public static PATTERN MARBNO(PATTERN p)       => new _MARBNO(p);
     public static PATTERN BAL()                   => new _BAL();
+    // Stage 6
+    public static PATTERN δ(PATTERN p, string n)  => new _δ(p, n);
+    public static PATTERN Δ(PATTERN p, string n)  => new _Δ(p, n);
+    public static PATTERN Θ(string n)             => new _Θ(n);
+    public static PATTERN θ(string n)             => new _θ(n);
+    public static PATTERN Λ(Func<bool> t)         => new _Λ(t);
+    public static PATTERN λ(Action c)             => new _λ(c);
+    public static PATTERN ζ(string n)             => new _ζ(n);
+    // Env registration
+    public static void GLOBALS(Dictionary<string,object> g) => Env.GLOBALS(g);
 }
 
-// ── Engine ────────────────────────────────────────────────────────────────────
+// ── Engine — executes cstack after successful match ───────────────────────────
 
 static class Engine
 {
     public static Slice? SEARCH(string S, PATTERN P, bool exc=false)
     {
         for (int c=0; c<=S.Length; c++) {
-            Ϣ.Push(new MatchState(c,S));
-            bool popped=false;
+            var state = new MatchState(c, S);
+            Ϣ.Push(state);
+            bool popped = false;
             try {
-                foreach (var sl in P.γ()) { Ϣ.Pop(); popped=true; return sl; }
+                foreach (var sl in P.γ()) {
+                    Ϣ.Pop(); popped = true;
+                    foreach (var act in state.cstack) act();   // fire deferred actions
+                    return sl;
+                }
             }
             catch (F) {
-                if (!popped){Ϣ.Pop();popped=true;}
+                if (!popped) { Ϣ.Pop(); popped=true; }
                 if (exc) throw;
                 return null;
             }
@@ -426,6 +521,7 @@ static class Engine
         if (exc) throw new F("FAIL");
         return null;
     }
+
     public static Slice? MATCH    (string S,PATTERN P,bool exc=false) => SEARCH(S,POS(0)+P,exc);
     public static Slice? FULLMATCH(string S,PATTERN P,bool exc=false) => SEARCH(S,POS(0)+P+RPOS(0),exc);
 }
@@ -439,15 +535,7 @@ static class T
     public static void NoMatch (string l,string s,PATTERN P) => Rep(l,Engine.FULLMATCH(s,P)==null);
     public static void Found   (string l,string s,PATTERN P) => Rep(l,Engine.SEARCH(s,P)!=null);
     public static void NotFound(string l,string s,PATTERN P) => Rep(l,Engine.SEARCH(s,P)==null);
-    public static void Slice(string l,string s,PATTERN P,int start,int stop) {
-        var r=Engine.SEARCH(s,P);
-        Rep(l,r!=null&&r.Value.Start==start&&r.Value.Stop==stop);
-    }
-    public static void Throws(string l,string s,PATTERN P) {
-        bool ok=false;
-        try { Engine.SEARCH(s,P,exc:true); } catch(F){ok=true;}
-        Rep(l,ok);
-    }
+    public static void Eq(string l, object? a, object? b) => Rep(l, Equals(a,b));
     static void Rep(string l,bool ok) {
         if(ok)_pass++;else _fail++;
         Console.WriteLine($"  {(ok?"PASS":"FAIL")}  {l}");
@@ -466,190 +554,263 @@ class Program
     const string ALPHA  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     const string ALNUM  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
+    // The one shared SNOBOL environment for all tests
+    static readonly Dictionary<string,object> G = new();
+
+    static string Gs(string k) => G.TryGetValue(k, out var v) ? v.ToString()! : "<unset>";
+    static int    Gi(string k) => G.TryGetValue(k, out var v) ? (int)v : -1;
+
     static void Main()
     {
-        Console.WriteLine("=== SNOBOL4cs V6  —  Stage 5: ARBNO · MARBNO · BAL ===");
-        Test_ARBNO();
-        Test_BAL();
-        Test_ARBNO_patterns();  // test_01.py Arb patterns with ARBNO
-        Test_BAL_patterns();    // test_01.py Bal patterns
+        GLOBALS(G);
+        Console.WriteLine("=== SNOBOL4cs V7  —  Stage 6: δ · Δ · Θ · θ · Λ · λ · ζ ===");
+        Test_δ();
+        Test_Δ();
+        Test_Θ();
+        Test_θ();
+        Test_Λ();
+        Test_λ();
+        Test_percent_operator();
+        Test_ζ_forward_ref();
+        Test_ζ_recursive();
         Test_regression();
         T.Summary();
     }
 
-    // ── ARBNO ─────────────────────────────────────────────────────────────────
-    // ARBNO(P) matches zero-or-more repetitions of P, shortest first.
-    static void Test_ARBNO()
+    // ── δ — immediate match assignment ────────────────────────────────────────
+    static void Test_δ()
     {
-        T.Section("ARBNO(P)");
+        T.Section("δ  immediate match assignment");
 
-        // Zero repetitions = always matches empty
-        PATTERN A = ARBNO(σ("ab"));
-        T.Slice  ("ARBNO(σ(ab)) first match = [0:0]",       "ababab", A, 0, 0);
+        Engine.FULLMATCH("42", POS(0) + δ(SPAN(DIGITS), "num") + RPOS(0));
+        T.Eq("δ captures \"42\"", Gs("num"), "42");
 
-        // ARBNO fullmatches zero repetitions of P on empty string
-        T.Match  ("ARBNO(σ(x)) fullmatches \"\"",            "",       ARBNO(σ("x")));
+        Engine.FULLMATCH("hello", POS(0) + δ(SPAN(ALPHA), "word") + RPOS(0));
+        T.Eq("δ captures \"hello\"", Gs("word"), "hello");
 
-        // ARBNO with POS+RPOS forces all repetitions
-        T.Match  ("ARBNO(σ(ab)) fullmatches \"ababab\"",     "ababab", POS(0)+ARBNO(σ("ab"))+RPOS(0));
-        T.Match  ("ARBNO(σ(ab)) fullmatches \"\"",           "",       POS(0)+ARBNO(σ("ab"))+RPOS(0));
-        T.NoMatch("ARBNO(σ(ab)) no match \"ababx\"",         "ababx",  POS(0)+ARBNO(σ("ab"))+RPOS(0));
+        // δ fires permanently — even when outer match later fails
+        G["num"] = "before";
+        Engine.FULLMATCH("123", POS(0) + δ(SPAN(DIGITS), "num") + σ("NOPE") + RPOS(0));
+        T.Eq("δ permanent: written even on outer failure", Gs("num"), "123");
 
-        // ARBNO of a char-class: zero-or-more digits
-        PATTERN digits_star = POS(0) + ARBNO(ANY(DIGITS)) + RPOS(0);
-        T.Match  ("ARBNO(ANY(digits)) fullmatches \"123\"",  "123",    digits_star);
-        T.Match  ("ARBNO(ANY(digits)) fullmatches \"\"",     "",       digits_star);
-        T.NoMatch("ARBNO(ANY(digits)) no match \"12a\"",     "12a",    digits_star);
-
-        // Shortest-first: SEARCH finds empty match first
-        T.Slice  ("ARBNO(ANY(digits)) shortest = [0:0] in \"123\"","123",
-                  ARBNO(ANY(DIGITS)), 0, 0);
-
-        // ARBNO forces greedy match only when combined with anchors or suffix
-        PATTERN greedy = POS(0) + ARBNO(ANY(DIGITS)) + RPOS(0);
-        T.Match  ("ARBNO greedy with anchors matches \"9876\"","9876", greedy);
-
-        // MARBNO is identical
-        T.Match  ("MARBNO(σ(ab)) fullmatches \"ababab\"",   "ababab", POS(0)+MARBNO(σ("ab"))+RPOS(0));
-        T.Match  ("MARBNO(σ(ab)) fullmatches \"\"",         "",       POS(0)+MARBNO(σ("ab"))+RPOS(0));
+        // δ with alternation
+        Engine.FULLMATCH("cat", POS(0) + δ(σ("cat") | σ("dog"), "pet") + RPOS(0));
+        T.Eq("δ(cat|dog) on \"cat\"", Gs("pet"), "cat");
+        Engine.FULLMATCH("dog", POS(0) + δ(σ("cat") | σ("dog"), "pet") + RPOS(0));
+        T.Eq("δ(cat|dog) on \"dog\"", Gs("pet"), "dog");
     }
 
-    // ── BAL ───────────────────────────────────────────────────────────────────
-    // BAL matches one balanced token: either a non-paren char,
-    // or a '(...)' group (possibly nested), yielding at each balanced point.
-    static void Test_BAL()
+    // ── Δ — conditional match assignment ─────────────────────────────────────
+    static void Test_Δ()
     {
-        T.Section("BAL()");
+        T.Section("Δ  conditional match assignment");
 
-        // Single char (no parens) — BAL yields it
-        T.Slice  ("BAL on \"a\" = [0:1]",                   "a",      BAL(), 0, 1);
+        Engine.FULLMATCH("hello", POS(0) + Δ(SPAN(ALPHA), "word") + RPOS(0));
+        T.Eq("Δ fires on success", Gs("word"), "hello");
 
-        // Simple paren group
-        T.Slice  ("BAL on \"(x)\" = [0:3]",                 "(x)",    BAL(), 0, 3);
+        // Δ does NOT fire when the overall match fails
+        G["word"] = "before";
+        Engine.FULLMATCH("abc123", POS(0) + Δ(SPAN(ALPHA), "word") + σ("NOPE") + RPOS(0));
+        T.Eq("Δ not fired on failure", Gs("word"), "before");
 
-        // Nested parens
-        T.Slice  ("BAL on \"((a))\" = [0:5]",               "((a))",  BAL(), 0, 5);
+        // Δ captures the value that contributed to the successful match,
+        // not an intermediate backtracked one
+        Engine.FULLMATCH("abc", POS(0) + Δ(σ("ab") | σ("abc"), "part") + RPOS(0));
+        T.Eq("Δ captures the match that succeeded: \"abc\"", Gs("part"), "abc");
 
-        // Unbalanced opening — BAL can't close the paren, but SEARCH advances
-        // cursor and finds single-char matches in the non-paren region
-        T.Found   ("BAL finds chars inside \"(unclosed\"",  "(unclosed", BAL());
-
-        // Unbalanced closing — BAL stops before it
-        // "(a)" followed by ")" — BAL on "(a))" yields [0:3], but then
-        // the next char is ')' which causes nest < 0, stopping the generator.
-        // SEARCH returns the first balanced match [0:3].
-        T.Slice  ("BAL on \"(a))\" = [0:3] (stops before extra ')'",
-                  "(a))",  BAL(), 0, 3);
-
-        // Empty parens — "()" is balanced
-        T.Slice  ("BAL on \"()\" = [0:2]",                  "()",     BAL(), 0, 2);
-
-        // BAL in a sequence: extract first balanced token
-        PATTERN token = POS(0) + BAL() + RPOS(0);
-        T.Match  ("BAL fullmatches \"(a+b)\"",               "(a+b)",  token);
-        T.Match  ("BAL fullmatches \"x\"",                   "x",      token);
-        T.Match  ("BAL fullmatches \"(a)b\" (yields [0:4] eventually)", "(a)b",   token);
-
-        // BAL yields progressively longer matches — SEARCH gives shortest
-        // On "ab": BAL yields [0:1] first (just "a"), then [0:2] ("ab")
-        T.Slice  ("BAL shortest on \"ab\" = [0:1]",          "ab",     BAL(), 0, 1);
+        // Multiple Δ in sequence: both fire on success
+        Engine.FULLMATCH("hello42",
+            POS(0) + Δ(SPAN(ALPHA), "w") + Δ(SPAN(DIGITS), "n") + RPOS(0));
+        T.Eq("Δ sequence: word",   Gs("w"), "hello");
+        T.Eq("Δ sequence: digits", Gs("n"), "42");
     }
 
-    // ── ARBNO combinatorial (test_01.py Arb patterns) ─────────────────────────
-    // From test_01.py: patterns built with ARBNO rather than ARB
-    static void Test_ARBNO_patterns()
+    // ── Θ — immediate cursor assignment ──────────────────────────────────────
+    static void Test_Θ()
     {
-        T.Section("ARBNO combinatorial (test_01.py-style)");
+        T.Section("Θ  immediate cursor assignment");
 
-        // CSV-like: comma-separated identifiers
-        PATTERN ident   = ANY(ALPHA) + NSPAN(ALNUM);
-        PATTERN csvline = POS(0) + ident + ARBNO(σ(",") + ident) + RPOS(0);
+        Engine.FULLMATCH("hello", POS(0) + σ("hel") + Θ("cp") + σ("lo") + RPOS(0));
+        T.Eq("Θ after \"hel\" = 3", Gi("cp"), 3);
 
-        T.Match  ("CSV: \"a\"",               "a",          csvline);
-        T.Match  ("CSV: \"a,b\"",             "a,b",        csvline);
-        T.Match  ("CSV: \"a,b,c\"",           "a,b,c",      csvline);
-        T.Match  ("CSV: \"foo,bar,baz\"",      "foo,bar,baz",csvline);
-        T.NoMatch("CSV: \"\"",                "",            csvline);
-        T.NoMatch("CSV: \"a,\"",              "a,",          csvline);
-        T.NoMatch("CSV: \",a\"",              ",a",          csvline);
+        Engine.FULLMATCH("abc", POS(0) + Θ("start") + REM() + RPOS(0));
+        T.Eq("Θ at start = 0", Gi("start"), 0);
 
-        // Repetition of a group: one-or-more (using Σ trick: P + ARBNO(P))
-        PATTERN one_or_more_digits = SPAN(DIGITS);  // simpler
-        PATTERN zero_or_more       = ARBNO(ANY(DIGITS));
-        PATTERN non_empty_num      = POS(0) + ANY(DIGITS) + ARBNO(ANY(DIGITS)) + RPOS(0);
-
-        T.Match  ("one-or-more digits: \"0\"",       "0",    non_empty_num);
-        T.Match  ("one-or-more digits: \"123\"",     "123",  non_empty_num);
-        T.NoMatch("one-or-more digits: \"\"",        "",     non_empty_num);
-        T.NoMatch("one-or-more digits: \"12a\"",     "12a",  non_empty_num);
-
-        // Nested ARBNO: ARBNO of ARBNO(P) — matches any number of groups
-        PATTERN ab_star_star = POS(0) + ARBNO(ARBNO(σ("a")) + σ("b")) + RPOS(0);
-        T.Match  ("ARBNO(ARBNO(a)+b) matches \"b\"",        "b",      ab_star_star);
-        T.Match  ("ARBNO(ARBNO(a)+b) matches \"ab\"",       "ab",     ab_star_star);
-        T.Match  ("ARBNO(ARBNO(a)+b) matches \"aab\"",      "aab",    ab_star_star);
-        T.Match  ("ARBNO(ARBNO(a)+b) matches \"ababaab\"",  "ababaab",ab_star_star);
-        T.Match  ("ARBNO(ARBNO(a)+b) matches \"\"",         "",       ab_star_star);
-        T.NoMatch("ARBNO(ARBNO(a)+b) no match \"a\"",       "a",      ab_star_star);
+        // Θ is immediate — writes even when outer match fails
+        G["cp"] = -1;
+        Engine.FULLMATCH("hi", POS(0) + σ("h") + Θ("cp") + σ("NOPE") + RPOS(0));
+        T.Eq("Θ immediate: written even on outer failure", Gi("cp"), 1);
     }
 
-    // ── BAL combinatorial (test_01.py Bal patterns) ───────────────────────────
-    static void Test_BAL_patterns()
+    // ── θ — conditional cursor assignment ────────────────────────────────────
+    static void Test_θ()
     {
-        T.Section("BAL combinatorial (test_01.py-style)");
+        T.Section("θ  conditional cursor assignment");
 
-        // test_01.py Bal: POS(0) + BAL() % 'OUTPUT' + RPOS(0)
-        // (without assignment for now) — just test the structural match
-        PATTERN Bal = POS(0) + BAL() + RPOS(0);
+        Engine.FULLMATCH("hello", POS(0) + σ("hel") + θ("cp") + σ("lo") + RPOS(0));
+        T.Eq("θ fires on success: cp = 3", Gi("cp"), 3);
 
-        // BAL yields at every point where nest==0, including bare non-paren chars
-        // and sequences like "(a)(b)" where it yields [0:3] then [0:6].
-        // Strings starting with ')' yield nothing from pos 0 (nest goes negative).
-        string[] yes = { "a", "x", "()", "(a)", "(a+b)", "((x))", "(())", "(a)(b)" };
-        string[] no  = { "", "(", "(a", ")", "a)" };
+        G["cp"] = -1;
+        Engine.FULLMATCH("hi", POS(0) + σ("h") + θ("cp") + σ("NOPE") + RPOS(0));
+        T.Eq("θ not fired on failure: cp = -1", Gi("cp"), -1);
 
-        foreach (var s in yes) T.Match  ($"Bal \"{s}\"", s, Bal);
-        foreach (var s in no)  T.NoMatch($"Bal no \"{s}\"", s, Bal);
-
-        // BAL used to extract balanced expressions from a larger string
-        PATTERN find_bal = σ("=") + BAL();
-        T.Found  ("find_bal in \"x=(a+b)\"",   "x=(a+b)",   find_bal);
-        T.Found  ("find_bal in \"y=z\"",        "y=z",       find_bal);
-        T.NotFound("find_bal in \"(no-eq)\"",   "(no-eq)",   find_bal);
-
-        // Comma-separated balanced expressions: BAL + ARBNO(σ(",") + BAL())
-        PATTERN bal_list = POS(0) + BAL() + ARBNO(σ(",") + BAL()) + RPOS(0);
-        T.Match  ("bal_list: \"a\"",             "a",         bal_list);
-        T.Match  ("bal_list: \"(x),y\"",         "(x),y",     bal_list);
-        T.Match  ("bal_list: \"(a),(b),(c)\"",   "(a),(b),(c)",bal_list);
-        T.NoMatch("bal_list: \"(a,b\"",          "(a,b",      bal_list);
+        // θ vs Θ contrast in same pattern: Θ writes, θ does not, when match fails
+        G["imm"] = -1; G["cond"] = -1;
+        Engine.FULLMATCH("xy", POS(0) + σ("x") + Θ("imm") + θ("cond") + σ("NOPE") + RPOS(0));
+        T.Eq("Θ fired (imm=1)",    Gi("imm"),  1);
+        T.Eq("θ not fired (cond=-1)", Gi("cond"), -1);
     }
 
-    // ── Regressions ───────────────────────────────────────────────────────────
+    // ── Λ — immediate predicate ───────────────────────────────────────────────
+    static void Test_Λ()
+    {
+        T.Section("Λ  immediate predicate / guard");
+
+        T.Match  ("Λ(true) passes",  "abc", POS(0) + Λ(()=>true)  + REM() + RPOS(0));
+        T.NoMatch("Λ(false) blocks", "abc", POS(0) + Λ(()=>false) + REM() + RPOS(0));
+
+        // Λ as numeric guard: capture digits, check value
+        PATTERN big = POS(0) + δ(SPAN(DIGITS), "n") + Λ(()=>int.Parse(Gs("n"))>10) + RPOS(0);
+        T.Match  ("Λ guard: 42 > 10",    "42", big);
+        T.NoMatch("Λ guard: 5 not > 10", "5",  big);
+        T.Match  ("Λ guard: 11 > 10",    "11", big);
+
+        // Λ is evaluated immediately — counts actual calls
+        int calls = 0;
+        Engine.FULLMATCH("x", POS(0) + Λ(()=>{calls++;return true;}) + REM() + RPOS(0));
+        T.Eq("Λ called exactly once", calls, 1);
+    }
+
+    // ── λ — conditional action ────────────────────────────────────────────────
+    static void Test_λ()
+    {
+        T.Section("λ  conditional action");
+
+        // λ fires after successful match
+        int fired = 0;
+        Engine.FULLMATCH("hi", POS(0) + λ(()=>fired++) + REM() + RPOS(0));
+        T.Eq("λ fires on success", fired, 1);
+
+        // λ does NOT fire when match fails
+        fired = 0;
+        Engine.FULLMATCH("hi", POS(0) + λ(()=>fired++) + σ("NOPE") + RPOS(0));
+        T.Eq("λ not fired on failure", fired, 0);
+
+        // λ used to run post-match logic (classic SNOBOL4 idiom).
+        // Important: λ closures read env *at cstack fire time* (after the full
+        // match).  To capture multiple fields, use unique env keys per field so
+        // later δ writes don't overwrite earlier ones before λ reads them.
+        int processed = 0;
+        PATTERN fields =
+            POS(0)
+            + δ(BREAK(","), "f0") + σ(",")
+            + δ(BREAK(","), "f1") + σ(",")
+            + δ(REM(),       "f2")
+            + λ(()=> processed = 3)
+            + RPOS(0);
+        Engine.FULLMATCH("a,bb,ccc", fields);
+        T.Eq("λ CSV: f0 = \"a\"",    Gs("f0"), "a");
+        T.Eq("λ CSV: f1 = \"bb\"",   Gs("f1"), "bb");
+        T.Eq("λ CSV: f2 = \"ccc\"",  Gs("f2"), "ccc");
+        T.Eq("λ CSV: action fired",  processed, 3);
+    }
+
+    // ── % operator — shorthand for Δ ─────────────────────────────────────────
+    static void Test_percent_operator()
+    {
+        T.Section("P % \"name\"  operator shorthand for Δ");
+
+        Engine.FULLMATCH("world",
+            POS(0) + (SPAN(ALPHA) % "w") + RPOS(0));
+        T.Eq("SPAN(ALPHA) % \"w\" captures \"world\"", Gs("w"), "world");
+
+        Engine.FULLMATCH("hello42",
+            POS(0) + (SPAN(ALPHA) % "word") + (SPAN(DIGITS) % "num") + RPOS(0));
+        T.Eq("% sequence: word",   Gs("word"), "hello");
+        T.Eq("% sequence: digits", Gs("num"),  "42");
+
+        // % does not fire on failure — same semantics as Δ
+        G["w"] = "before";
+        Engine.FULLMATCH("abc", POS(0) + (SPAN(ALPHA) % "w") + σ("NOPE") + RPOS(0));
+        T.Eq("% not fired on failure", Gs("w"), "before");
+    }
+
+    // ── ζ — deferred pattern reference (forward reference) ───────────────────
+    static void Test_ζ_forward_ref()
+    {
+        T.Section("ζ  deferred pattern reference");
+
+        // Store pattern in env, reference it by name
+        G["WORD"] = POS(0) + SPAN(ALPHA) + RPOS(0);
+        T.Match  ("ζ(WORD) resolves from env: \"hello\"", "hello", ζ("WORD"));
+        T.NoMatch("ζ(WORD) no match \"123\"",             "123",   ζ("WORD"));
+
+        // ζ re-evaluates at each match — updating env changes behaviour
+        G["P"] = σ("foo");
+        T.Match  ("ζ(P) = σ(foo) matches \"foo\"", "foo", POS(0)+ζ("P")+RPOS(0));
+        G["P"] = σ("bar");
+        T.Match  ("ζ(P) = σ(bar) after update matches \"bar\"", "bar", POS(0)+ζ("P")+RPOS(0));
+        T.NoMatch("ζ(P) = σ(bar) no match \"foo\"", "foo", POS(0)+ζ("P")+RPOS(0));
+    }
+
+    // ── ζ — recursive grammar (the real payoff) ───────────────────────────────
+    //
+    // A simple expression parser using ζ for left-recursion avoidance.
+    // Grammar:  expr  ::=  atom ( ('+' | '-') atom )*
+    //           atom  ::=  digit+  |  '(' expr ')'
+    //
+    // We build this with ζ("expr") to allow atom to reference expr before
+    // expr is fully constructed — the classic forward-reference case.
+
+    static void Test_ζ_recursive()
+    {
+        T.Section("ζ  recursive grammar (expr parser)");
+
+        // atom = SPAN(DIGITS) | '(' + ζ("expr") + ')'
+        PATTERN atom =
+              SPAN(DIGITS)
+            | σ("(") + ζ("expr") + σ(")");
+
+        // expr = atom + ARBNO( ('+' | '-') + atom )
+        PATTERN expr = atom + ARBNO((σ("+") | σ("-")) + atom);
+
+        // Register expr by name so ζ("expr") can find it
+        G["expr"] = expr;
+
+        PATTERN full = POS(0) + expr + RPOS(0);
+
+        string[] yes = { "1", "42", "1+2", "10-3+4", "(1)", "(1+2)", "1+(2+3)", "(1+2)-(3+4)" };
+        string[] no  = { "", "+", "1+", "(1", "1)", "1++2" };
+
+        foreach (var s in yes) T.Match  ($"expr \"{s}\"", s, full);
+        foreach (var s in no)  T.NoMatch($"expr no \"{s}\"", s, full);
+    }
+
+    // ── Regression ────────────────────────────────────────────────────────────
     static void Test_regression()
     {
-        T.Section("Regression: V1-V5 patterns");
+        T.Section("Regression: prior stages");
 
         // BEAD
-        PATTERN bead =
-              POS(0) + Π(σ("B"),σ("F"),σ("L"),σ("R"))
+        PATTERN bead = POS(0) + Π(σ("B"),σ("F"),σ("L"),σ("R"))
             + Π(σ("E"),σ("EA")) + Π(σ("D"),σ("DS")) + RPOS(0);
-        string[] byes={"BED","FEAD","LEADS","READS"};
-        string[] bnos={"BID","BREAD",""};
-        foreach (var w in byes) T.Match  ($"BEAD \"{w}\"",w,bead);
-        foreach (var w in bnos) T.NoMatch($"BEAD \"{w}\"",w,bead);
+        T.Match  ("BEAD \"READS\"", "READS", bead);
+        T.NoMatch("BEAD \"BID\"",   "BID",   bead);
 
         // identifier
         PATTERN ident = POS(0)+ANY(ALPHA)+NSPAN(ALNUM)+RPOS(0);
-        T.Match  ("ident \"Hello\"",  "Hello",  ident);
-        T.NoMatch("ident \"1bad\"",   "1bad",   ident);
+        T.Match  ("ident \"CamelCase\"", "CamelCase", ident);
+        T.NoMatch("ident \"1bad\"",      "1bad",      ident);
 
         // real_number
-        PATTERN real =
-              POS(0) + ~ANY("+-") + SPAN(DIGITS)
-            + ~(σ(".") + NSPAN(DIGITS)) + RPOS(0);
-        T.Match  ("real \"3.14\"",    "3.14",   real);
-        T.Match  ("real \"-7\"",      "-7",     real);
-        T.NoMatch("real \"abc\"",     "abc",    real);
+        PATTERN real = POS(0)+~ANY("+-")+SPAN(DIGITS)+~(σ(".")+NSPAN(DIGITS))+RPOS(0);
+        T.Match  ("real \"+3.14\"", "+3.14", real);
+        T.NoMatch("real \"abc\"",   "abc",   real);
+
+        // ARBNO CSV
+        PATTERN csvid = ANY(ALPHA)+NSPAN(ALNUM);
+        PATTERN csv   = POS(0)+csvid+ARBNO(σ(",")+csvid)+RPOS(0);
+        T.Match  ("csv \"a,b,c\"",    "a,b,c",   csv);
+        T.NoMatch("csv \"a,,b\"",     "a,,b",    csv);
     }
 }
