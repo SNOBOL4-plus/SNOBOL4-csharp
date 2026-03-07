@@ -82,6 +82,9 @@ public static class S4 {
     public static PATTERN Δ(PATTERN p, Slot s)               => new _Δ(p, s.Name);
     // GLOBALS — kept for backward compat
     public static void GLOBALS(Dictionary<string, object> g) => Env.GLOBALS(g);
+    // TRACE — configure sliding-window trace output
+    public static void TRACE(TraceLevel level = TraceLevel.Off, int window = 12, System.IO.TextWriter? output = null)
+        => Tracer.TRACE(level, window, output);
     // _ — global SNOBOL environment (thread-local dynamic)
     [ThreadStatic] static SnobolEnv? __env;
     public static dynamic _ => __env ??= new SnobolEnv();

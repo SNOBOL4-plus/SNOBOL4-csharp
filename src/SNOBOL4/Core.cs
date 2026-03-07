@@ -71,12 +71,14 @@ namespace SNOBOL4
         public readonly List<int>          istack = new();
         public int                         itop   = -1;
         public readonly List<List<object>> vstack = new();
+        public int depth = 0;
         public MatchState(int p, string s) { pos = p; subject = s; }
     }
 
     public static class Ϣ
     {
-        static readonly Stack<MatchState> _s = new();
+        [ThreadStatic] static Stack<MatchState>? _ts;
+        static Stack<MatchState> _s => _ts ??= new Stack<MatchState>();
         public static void       Push(MatchState s) => _s.Push(s);
         public static void       Pop()              => _s.Pop();
         public static MatchState Top               => _s.Peek();

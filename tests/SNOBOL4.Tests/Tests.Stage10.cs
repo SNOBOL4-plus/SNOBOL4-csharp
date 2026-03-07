@@ -315,6 +315,9 @@ static class Tests10
         Test_RE_tree_is_list();
         Test_RE_no_parse();
         // ── test_json.py ─────────────────────────────────── TODO
+        // ── v13 TRACE / NSPAN / thread-local Ϣ ─────────────────────────────
+        Test_TRACE();
+        Test_NSPAN();
         // ── v12 SnobolEnv / Slot / >> ────────────────────────────────────────
         Test_SnobolEnv();
     }
@@ -743,6 +746,53 @@ static class Tests10
         r = Engine.SEARCH("null", jElement);
         T.Eq("jElement null matched", true, r != null);
     }
+
+    // =========================================================================
+    // v13 · TRACE — sliding window output
+    // =========================================================================
+    static void Test_TRACE()
+    {
+        T.Section("v13 · TRACE sliding window");
+
+        // Capture trace output to a StringWriter
+        var sw = new System.IO.StringWriter();
+        TRACE(TraceLevel.Info, window: 6, output: sw);
+
+        Engine.FULLMATCH("hello", POS(0) + SPAN(ALPHA) % (Slot)S4._.w + RPOS(0));
+
+        TRACE();  // turn off
+        var output = sw.ToString();
+
+        // Should contain position marker and SPAN success
+        T.Eq("TRACE output non-empty",    true,  output.Length > 0);
+        T.Eq("TRACE contains |",         true,  output.Contains("|"));
+        T.Eq("TRACE contains SPAN",      true,  output.Contains("SPAN"));
+        T.Eq("TRACE contains SUCCESS",   true,  output.Contains("SUCCESS"));
+        T.Eq("TRACE contains hello",     true,  output.Contains("hello"));
+    }
+
+    // =========================================================================
+    // v13 · NSPAN — zero-or-more, always succeeds
+    // =========================================================================
+    static void Test_NSPAN()
+    {
+        T.Section("v13 · NSPAN zero-or-more always succeeds");
+
+        // Matches zero chars — succeeds with empty slice
+        T.Match("NSPAN empty string",   "",      POS(0) + NSPAN(DIGITS) + RPOS(0));
+        T.NoMatch("NSPAN no digits full", "abc", POS(0) + NSPAN(DIGITS) + RPOS(0));
+        T.Match("NSPAN all digits",     "123",   POS(0) + NSPAN(DIGITS) + RPOS(0));
+        // NSPAN partial: use SEARCH (T.Match wraps in FULLMATCH which adds RPOS(0), conflicting with RPOS(3))
+        T.Eq("NSPAN partial", true, Engine.SEARCH("123abc", POS(0) + NSPAN(DIGITS) + RPOS(3)) != null);
+        T.Match("NSPAN as suffix",      "abc",   POS(0) + SPAN(ALPHA) + NSPAN(DIGITS) + RPOS(0));
+        T.Match("NSPAN after SPAN",     "abc123",POS(0) + SPAN(ALPHA) + NSPAN(DIGITS) + RPOS(0));
+        // NSPAN in identifier pattern (classic use case)
+        var ident = POS(0) + ANY(ALPHA) + NSPAN(ALPHA + DIGITS) + RPOS(0);
+        T.Match("NSPAN ident single",   "A",     ident);
+        T.Match("NSPAN ident mixed",    "Abc123",ident);
+        T.NoMatch("NSPAN ident digit",  "1abc",  ident);
+    }
+
     // =========================================================================
     // SnobolEnv / Slot / >> operator — new v12 API
     // =========================================================================
