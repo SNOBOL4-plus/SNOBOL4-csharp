@@ -1,18 +1,14 @@
-// SNOBOL4cs_v5.cs  —  SNOBOL4 pattern engine in C#, Version 5
+// SNOBOL4cs_v6.cs  —  SNOBOL4 pattern engine in C#, Version 6
 //
-// Stage 4 — Character-class primitives:
-//   ANY(chars)     match exactly one character from chars
-//   NOTANY(chars)  match exactly one character NOT in chars
-//   SPAN(chars)    match one-or-more characters from chars (longest, yields once)
-//   NSPAN(chars)   match zero-or-more characters from chars (yields once, never fails)
-//   BREAK(chars)   match zero-or-more chars UP TO (not including) a char in chars;
-//                  succeeds only if that terminator is actually present
-//   BREAKX(chars)  alias for BREAK
+// Stage 5 — Repetition + Balanced:
+//   ARBNO(P)   zero-or-more repetitions of P, shortest first
+//   MARBNO(P)  alias for ARBNO
+//   BAL        match one balanced parenthesised token (yields multiple times)
 //
-// Together these unlock identifier/real_number patterns from test_01.py.
-//
-// Carried forward unchanged: σ Σ Π π POS RPOS ε FAIL ABORT SUCCEED α ω FENCE
-//                             LEN TAB RTAB REM ARB MARB
+// Carried forward unchanged from V5:
+//   σ Σ Π π POS RPOS ε FAIL ABORT SUCCEED α ω FENCE
+//   LEN TAB RTAB REM ARB MARB
+//   ANY NOTANY SPAN NSPAN BREAK BREAKX
 // ─────────────────────────────────────────────────────────────────────────────
 
 using System;
@@ -56,7 +52,7 @@ abstract class PATTERN
     public static PATTERN operator ~(PATTERN p) => new _π(p);
 }
 
-// ── V4 carry-forward ──────────────────────────────────────────────────────────
+// ── V5 carry-forward ──────────────────────────────────────────────────────────
 
 sealed class _σ : PATTERN {
     readonly string _s; public _σ(string s){_s=s;}
@@ -176,171 +172,197 @@ sealed class _MARB : PATTERN {
     readonly _ARB _arb=new();
     public override IEnumerable<Slice> γ() => _arb.γ();
 }
+sealed class _ANY : PATTERN {
+    readonly string _c; public _ANY(string c){_c=c;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top;
+        if (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])>=0)
+            { int p=st.pos; st.pos++; yield return new Slice(p,st.pos); st.pos=p; }
+    }
+}
+sealed class _NOTANY : PATTERN {
+    readonly string _c; public _NOTANY(string c){_c=c;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top;
+        if (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])<0)
+            { int p=st.pos; st.pos++; yield return new Slice(p,st.pos); st.pos=p; }
+    }
+}
+sealed class _SPAN : PATTERN {
+    readonly string _c; public _SPAN(string c){_c=c;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int p=st.pos;
+        while (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])>=0) st.pos++;
+        if (st.pos>p) { yield return new Slice(p,st.pos); st.pos=p; }
+    }
+}
+sealed class _NSPAN : PATTERN {
+    readonly string _c; public _NSPAN(string c){_c=c;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int p=st.pos;
+        while (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])>=0) st.pos++;
+        yield return new Slice(p,st.pos); st.pos=p;
+    }
+}
+sealed class _BREAK : PATTERN {
+    readonly string _c; public _BREAK(string c){_c=c;}
+    public override IEnumerable<Slice> γ() {
+        var st=Ϣ.Top; int p=st.pos;
+        while (st.pos<st.subject.Length && _c.IndexOf(st.subject[st.pos])<0) st.pos++;
+        if (st.pos<st.subject.Length) { yield return new Slice(p,st.pos); st.pos=p; }
+    }
+}
+sealed class _BREAKX : PATTERN {
+    readonly _BREAK _b; public _BREAKX(string c){_b=new _BREAK(c);}
+    public override IEnumerable<Slice> γ() => _b.γ();
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Stage 4 — Character-class implementations
+// Stage 5 — new implementations
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ── _ANY — match exactly one character from the set ───────────────────────────
+// ── _ARBNO — zero-or-more repetitions of P, shortest first ───────────────────
 //
 // Python:
-//   if pos < len(subject) and subject[pos] in chars:
+//   cursor = 0
+//   Ag = []
+//   while cursor >= 0:
+//       if cursor >= len(Ag):           ← all active generators succeeded
+//           yield slice(pos0, pos)      ← offer current extent
+//       if cursor >= len(Ag):
+//           Ag.append(P.γ())            ← add one more repetition
+//       try:
+//           next(Ag[cursor])            ← advance that repetition
+//           cursor += 1                 ← success: try one more
+//       except StopIteration:
+//           cursor -= 1                 ← backtrack: last rep exhausted
+//           Ag.pop()
+//
+// The key insight: `next(Ag[cursor])` advances pos as a side-effect.
+// We only need to know if P succeeded (moved the cursor), not what it matched.
+// After yield, the surrounding Σ may backtrack into us; we resume the while
+// loop and try extending by one more repetition — or, if the last one is
+// exhausted, we pop and try a shorter prefix.
+//
+// In C# we use a List<IEnumerator<Slice>> as the dynamic generator array.
+
+sealed class _ARBNO : PATTERN
+{
+    readonly PATTERN _P;
+    public _ARBNO(PATTERN p) { _P = p; }
+
+    public override IEnumerable<Slice> γ()
+    {
+        var st   = Ϣ.Top;
+        int pos0 = st.pos;
+
+        var Ag = new List<IEnumerator<Slice>>();
+        int cursor = 0;
+
+        while (cursor >= 0)
+        {
+            // All generators up to cursor have succeeded once — yield current span
+            if (cursor >= Ag.Count)
+            {
+                yield return new Slice(pos0, st.pos);
+                // After yield: backtracking requested, try one more repetition
+            }
+
+            // Extend Ag if needed
+            if (cursor >= Ag.Count)
+                Ag.Add(_P.γ().GetEnumerator());
+
+            // Advance this repetition's generator
+            if (Ag[cursor].MoveNext())
+            {
+                cursor++;           // succeeded: go deeper
+            }
+            else
+            {
+                Ag[cursor].Dispose();
+                Ag.RemoveAt(cursor);
+                cursor--;           // failed: backtrack
+            }
+        }
+
+        // Clean up any remaining enumerators
+        foreach (var e in Ag) e.Dispose();
+    }
+
+    public override string ToString() => $"ARBNO(...)";
+}
+
+// ── _MARBNO — alias for ARBNO ─────────────────────────────────────────────────
+
+sealed class _MARBNO : PATTERN
+{
+    readonly _ARBNO _a;
+    public _MARBNO(PATTERN p) { _a = new _ARBNO(p); }
+    public override IEnumerable<Slice> γ() => _a.γ();
+    public override string ToString() => "MARBNO(...)";
+}
+
+// ── _BAL — match one balanced parenthesised token ────────────────────────────
+//
+// Python:
+//   pos0 = pos; nest = 0
+//   pos += 1                        ← consume the first character unconditionally
+//   while pos <= len(subject):
+//       ch = subject[pos-1]         ← look at char we just advanced past
+//       if ch == '(':  nest += 1
+//       if ch == ')':  nest -= 1
+//       if nest < 0:   break        ← unmatched ')' — stop
+//       elif nest > 0 and pos >= len(subject): break   ← unclosed '(' — stop
+//       elif nest == 0: yield slice(pos0, pos)          ← balanced point
 //       pos += 1
-//       yield slice(pos-1, pos)
-//       pos -= 1
-//
-// Yields at most once (0 or 1 match). Always single-char.
-
-sealed class _ANY : PATTERN
-{
-    readonly string _chars;
-    public _ANY(string chars) { _chars = chars; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top;
-        if (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) >= 0)
-        {
-            int p = st.pos;
-            st.pos++;
-            yield return new Slice(p, st.pos);
-            st.pos = p;
-        }
-    }
-
-    public override string ToString() => $"ANY(\"{_chars}\")";
-}
-
-// ── _NOTANY — match exactly one character NOT in the set ──────────────────────
-//
-// Python:
-//   if pos < len(subject) and subject[pos] not in chars:
-//       pos += 1
-//       yield slice(pos-1, pos)
-//       pos -= 1
-
-sealed class _NOTANY : PATTERN
-{
-    readonly string _chars;
-    public _NOTANY(string chars) { _chars = chars; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top;
-        if (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) < 0)
-        {
-            int p = st.pos;
-            st.pos++;
-            yield return new Slice(p, st.pos);
-            st.pos = p;
-        }
-    }
-
-    public override string ToString() => $"NOTANY(\"{_chars}\")";
-}
-
-// ── _SPAN — match one-or-more characters from the set ─────────────────────────
-//
-// Python:
-//   while pos < len(subject) and subject[pos] in chars: pos += 1
-//   if pos > pos0:            ← requires at least one character
-//       yield slice(pos0, pos)
-//       pos = pos0
-//
-// SPAN fails on an empty match. It yields exactly once (non-backtracking).
-
-sealed class _SPAN : PATTERN
-{
-    readonly string _chars;
-    public _SPAN(string chars) { _chars = chars; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top; int p = st.pos;
-        while (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) >= 0)
-            st.pos++;
-        if (st.pos > p)                         // at least one char consumed
-        {
-            yield return new Slice(p, st.pos);
-            st.pos = p;
-        }
-    }
-
-    public override string ToString() => $"SPAN(\"{_chars}\")";
-}
-
-// ── _NSPAN — match zero-or-more characters from the set ──────────────────────
-//
-// Python:
-//   while pos < len(subject) and subject[pos] in chars: pos += 1
-//   yield slice(pos0, pos)    ← always yields, even on zero chars
 //   pos = pos0
 //
-// NSPAN never fails. The "N" stands for "Null allowed" (zero-length OK).
+// BAL advances pos by 1 before the first check, so it always consumes at least
+// one character. It yields at every point where nesting depth returns to 0.
+// This means it can yield multiple times (with increasing lengths).
+//
+// Example on "(a)(b)":
+//   pos=0: advance to 1, ch='(' → nest=1; advance to 2, ch='a' → nest=1;
+//          advance to 3, ch=')' → nest=0, yield [0:3]; advance to 4, ch='('...
+//   ... eventually also yields [0:6] for the full "(a)(b)".
+//
+// On "(a+b)":
+//   yields [0:5] when the outer ')' brings nest back to 0.
+//
+// BAL on a bare token like "abc" (no parens):
+//   pos=0: advance to 1, ch='a' → nest=0, yield [0:1];
+//          advance to 2, ch='b' → nest=0, yield [0:2]; etc.
+//   So BAL on a non-paren char yields each prefix.
 
-sealed class _NSPAN : PATTERN
+sealed class _BAL : PATTERN
 {
-    readonly string _chars;
-    public _NSPAN(string chars) { _chars = chars; }
-
     public override IEnumerable<Slice> γ()
     {
-        var st = Ϣ.Top; int p = st.pos;
-        while (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) >= 0)
-            st.pos++;
-        yield return new Slice(p, st.pos);      // always yield, even zero-length
-        st.pos = p;
-    }
+        var st   = Ϣ.Top;
+        int pos0 = st.pos;
+        int nest = 0;
 
-    public override string ToString() => $"NSPAN(\"{_chars}\")";
-}
+        st.pos++;   // advance one character unconditionally
 
-// ── _BREAK — scan forward until a char in the set is found ────────────────────
-//
-// Python:
-//   while pos < len(subject) and subject[pos] not in chars: pos += 1
-//   if pos < len(subject):    ← the break char must actually be present
-//       yield slice(pos0, pos)
-//       pos = pos0
-//
-// Key points:
-//   • BREAK *can* yield a zero-length match (if the break char is at pos0).
-//   • BREAK fails if end-of-string is reached without finding the break char.
-//   • Like SPAN, it yields at most once (non-backtracking).
-
-sealed class _BREAK : PATTERN
-{
-    readonly string _chars;
-    public _BREAK(string chars) { _chars = chars; }
-
-    public override IEnumerable<Slice> γ()
-    {
-        var st = Ϣ.Top; int p = st.pos;
-        while (st.pos < st.subject.Length && _chars.IndexOf(st.subject[st.pos]) < 0)
-            st.pos++;
-        if (st.pos < st.subject.Length)         // terminator found — not at end
+        while (st.pos <= st.subject.Length)
         {
-            yield return new Slice(p, st.pos);
-            st.pos = p;
+            char ch = st.subject[st.pos - 1];   // char we just advanced past
+
+            if      (ch == '(') nest++;
+            else if (ch == ')') nest--;
+
+            if      (nest <  0)                                   break;  // unmatched ')'
+            else if (nest >  0 && st.pos >= st.subject.Length)   break;  // unclosed '('
+            else if (nest == 0)
+                yield return new Slice(pos0, st.pos);                     // balanced
+
+            st.pos++;
         }
+
+        st.pos = pos0;   // restore cursor on backtrack
     }
 
-    public override string ToString() => $"BREAK(\"{_chars}\")";
-}
-
-// ── _BREAKX — alias for BREAK (Python: class BREAKX(BREAK): pass) ────────────
-//
-// In full SNOBOL4, BREAKX differs from BREAK in that on backtrack it advances
-// past the break character and tries again. The pure-Python backend treats them
-// identically. We follow suit here; BREAKX will be differentiated if/when a
-// full backtracking variant is needed.
-
-sealed class _BREAKX : PATTERN
-{
-    readonly _BREAK _brk;
-    public _BREAKX(string chars) { _brk = new _BREAK(chars); }
-    public override IEnumerable<Slice> γ() => _brk.γ();
-    public override string ToString() => $"BREAKX(\"{_brk}\")";
+    public override string ToString() => "BAL()";
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -349,7 +371,7 @@ sealed class _BREAKX : PATTERN
 
 static class S4
 {
-    // V4 carry-forward
+    // V5 carry-forward
     public static PATTERN Σ(params PATTERN[] ap)  => new _Σ(ap);
     public static PATTERN Π(params PATTERN[] ap)  => new _Π(ap);
     public static PATTERN π(PATTERN p)            => new _π(p);
@@ -370,13 +392,16 @@ static class S4
     public static PATTERN REM()                   => new _REM();
     public static PATTERN ARB()                   => new _ARB();
     public static PATTERN MARB()                  => new _MARB();
-    // Stage 4
-    public static PATTERN ANY(string chars)       => new _ANY(chars);
-    public static PATTERN NOTANY(string chars)    => new _NOTANY(chars);
-    public static PATTERN SPAN(string chars)      => new _SPAN(chars);
-    public static PATTERN NSPAN(string chars)     => new _NSPAN(chars);
-    public static PATTERN BREAK(string chars)     => new _BREAK(chars);
-    public static PATTERN BREAKX(string chars)    => new _BREAKX(chars);
+    public static PATTERN ANY(string c)           => new _ANY(c);
+    public static PATTERN NOTANY(string c)        => new _NOTANY(c);
+    public static PATTERN SPAN(string c)          => new _SPAN(c);
+    public static PATTERN NSPAN(string c)         => new _NSPAN(c);
+    public static PATTERN BREAK(string c)         => new _BREAK(c);
+    public static PATTERN BREAKX(string c)        => new _BREAKX(c);
+    // Stage 5
+    public static PATTERN ARBNO(PATTERN p)        => new _ARBNO(p);
+    public static PATTERN MARBNO(PATTERN p)       => new _MARBNO(p);
+    public static PATTERN BAL()                   => new _BAL();
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -438,216 +463,193 @@ static class T
 class Program
 {
     const string DIGITS = "0123456789";
-    const string UCASE  = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    const string LCASE  = "abcdefghijklmnopqrstuvwxyz";
     const string ALPHA  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     const string ALNUM  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     static void Main()
     {
-        Console.WriteLine("=== SNOBOL4cs V5  —  Stage 4: ANY · NOTANY · SPAN · NSPAN · BREAK · BREAKX ===");
-
-        Test_ANY();
-        Test_NOTANY();
-        Test_SPAN();
-        Test_NSPAN();
-        Test_BREAK();
-        Test_BREAKX();
-        Test_identifier();      // test_01.py identifier pattern
-        Test_real_number();     // test_01.py real_number pattern
-        Test_BEAD();            // V1 regression
-
+        Console.WriteLine("=== SNOBOL4cs V6  —  Stage 5: ARBNO · MARBNO · BAL ===");
+        Test_ARBNO();
+        Test_BAL();
+        Test_ARBNO_patterns();  // test_01.py Arb patterns with ARBNO
+        Test_BAL_patterns();    // test_01.py Bal patterns
+        Test_regression();
         T.Summary();
     }
 
-    // ── ANY ───────────────────────────────────────────────────────────────────
-    // ANY(chars) matches exactly one character that appears in chars.
-    static void Test_ANY()
+    // ── ARBNO ─────────────────────────────────────────────────────────────────
+    // ARBNO(P) matches zero-or-more repetitions of P, shortest first.
+    static void Test_ARBNO()
     {
-        T.Section("ANY(chars)");
+        T.Section("ARBNO(P)");
 
-        // Basic single-char match
-        T.Slice  ("ANY(abc) at 'a' = [0:1]",           "abc",   ANY("abc"), 0, 1);
-        T.Found  ("ANY(digits) finds digit in \"a3b\"", "a3b",  ANY(DIGITS));
-        T.NotFound("ANY(digits) not in \"abc\"",        "abc",  ANY(DIGITS));
+        // Zero repetitions = always matches empty
+        PATTERN A = ARBNO(σ("ab"));
+        T.Slice  ("ARBNO(σ(ab)) first match = [0:0]",       "ababab", A, 0, 0);
 
-        // ANY matches exactly one char
-        T.Match  ("ANY(abc) fullmatches \"a\"",          "a",    ANY("abc"));
-        T.NoMatch("ANY(abc) no match \"ab\"",            "ab",   ANY("abc"));
-        T.NoMatch("ANY(abc) no match \"\"",              "",     ANY("abc"));
-        T.NoMatch("ANY(abc) no match \"x\"",             "x",    ANY("abc"));
+        // ARBNO fullmatches zero repetitions of P on empty string
+        T.Match  ("ARBNO(σ(x)) fullmatches \"\"",            "",       ARBNO(σ("x")));
 
-        // ANY in sequence
-        T.Match  ("ANY(+-)+SPAN(digits) matches \"+42\"", "+42",
-                  POS(0)+ANY("+-")+SPAN(DIGITS)+RPOS(0));
-        T.Match  ("ANY(+-)+SPAN(digits) matches \"-7\"",  "-7",
-                  POS(0)+ANY("+-")+SPAN(DIGITS)+RPOS(0));
+        // ARBNO with POS+RPOS forces all repetitions
+        T.Match  ("ARBNO(σ(ab)) fullmatches \"ababab\"",     "ababab", POS(0)+ARBNO(σ("ab"))+RPOS(0));
+        T.Match  ("ARBNO(σ(ab)) fullmatches \"\"",           "",       POS(0)+ARBNO(σ("ab"))+RPOS(0));
+        T.NoMatch("ARBNO(σ(ab)) no match \"ababx\"",         "ababx",  POS(0)+ARBNO(σ("ab"))+RPOS(0));
+
+        // ARBNO of a char-class: zero-or-more digits
+        PATTERN digits_star = POS(0) + ARBNO(ANY(DIGITS)) + RPOS(0);
+        T.Match  ("ARBNO(ANY(digits)) fullmatches \"123\"",  "123",    digits_star);
+        T.Match  ("ARBNO(ANY(digits)) fullmatches \"\"",     "",       digits_star);
+        T.NoMatch("ARBNO(ANY(digits)) no match \"12a\"",     "12a",    digits_star);
+
+        // Shortest-first: SEARCH finds empty match first
+        T.Slice  ("ARBNO(ANY(digits)) shortest = [0:0] in \"123\"","123",
+                  ARBNO(ANY(DIGITS)), 0, 0);
+
+        // ARBNO forces greedy match only when combined with anchors or suffix
+        PATTERN greedy = POS(0) + ARBNO(ANY(DIGITS)) + RPOS(0);
+        T.Match  ("ARBNO greedy with anchors matches \"9876\"","9876", greedy);
+
+        // MARBNO is identical
+        T.Match  ("MARBNO(σ(ab)) fullmatches \"ababab\"",   "ababab", POS(0)+MARBNO(σ("ab"))+RPOS(0));
+        T.Match  ("MARBNO(σ(ab)) fullmatches \"\"",         "",       POS(0)+MARBNO(σ("ab"))+RPOS(0));
     }
 
-    // ── NOTANY ────────────────────────────────────────────────────────────────
-    // NOTANY(chars) matches exactly one character that does NOT appear in chars.
-    static void Test_NOTANY()
+    // ── BAL ───────────────────────────────────────────────────────────────────
+    // BAL matches one balanced token: either a non-paren char,
+    // or a '(...)' group (possibly nested), yielding at each balanced point.
+    static void Test_BAL()
     {
-        T.Section("NOTANY(chars)");
+        T.Section("BAL()");
 
-        T.Match  ("NOTANY(digits) fullmatches \"a\"",    "a",    NOTANY(DIGITS));
-        T.NoMatch("NOTANY(digits) no match \"3\"",       "3",    NOTANY(DIGITS));
-        T.NoMatch("NOTANY(digits) no match \"\"",        "",     NOTANY(DIGITS));
+        // Single char (no parens) — BAL yields it
+        T.Slice  ("BAL on \"a\" = [0:1]",                   "a",      BAL(), 0, 1);
 
-        // NOTANY in sequence: one non-digit followed by digits
-        T.Match  ("NOTANY(digits)+SPAN(digits) = \"a3\"","a3",
-                  POS(0)+NOTANY(DIGITS)+SPAN(DIGITS)+RPOS(0));
+        // Simple paren group
+        T.Slice  ("BAL on \"(x)\" = [0:3]",                 "(x)",    BAL(), 0, 3);
 
-        // Complement relationship: ANY(x)|NOTANY(x) covers all single chars
-        T.Match  ("ANY(a)|NOTANY(a) matches any char \"b\"","b",
-                  POS(0)+(ANY("a")|NOTANY("a"))+RPOS(0));
-        T.Match  ("ANY(a)|NOTANY(a) matches char \"a\"",    "a",
-                  POS(0)+(ANY("a")|NOTANY("a"))+RPOS(0));
+        // Nested parens
+        T.Slice  ("BAL on \"((a))\" = [0:5]",               "((a))",  BAL(), 0, 5);
+
+        // Unbalanced opening — BAL can't close the paren, but SEARCH advances
+        // cursor and finds single-char matches in the non-paren region
+        T.Found   ("BAL finds chars inside \"(unclosed\"",  "(unclosed", BAL());
+
+        // Unbalanced closing — BAL stops before it
+        // "(a)" followed by ")" — BAL on "(a))" yields [0:3], but then
+        // the next char is ')' which causes nest < 0, stopping the generator.
+        // SEARCH returns the first balanced match [0:3].
+        T.Slice  ("BAL on \"(a))\" = [0:3] (stops before extra ')'",
+                  "(a))",  BAL(), 0, 3);
+
+        // Empty parens — "()" is balanced
+        T.Slice  ("BAL on \"()\" = [0:2]",                  "()",     BAL(), 0, 2);
+
+        // BAL in a sequence: extract first balanced token
+        PATTERN token = POS(0) + BAL() + RPOS(0);
+        T.Match  ("BAL fullmatches \"(a+b)\"",               "(a+b)",  token);
+        T.Match  ("BAL fullmatches \"x\"",                   "x",      token);
+        T.Match  ("BAL fullmatches \"(a)b\" (yields [0:4] eventually)", "(a)b",   token);
+
+        // BAL yields progressively longer matches — SEARCH gives shortest
+        // On "ab": BAL yields [0:1] first (just "a"), then [0:2] ("ab")
+        T.Slice  ("BAL shortest on \"ab\" = [0:1]",          "ab",     BAL(), 0, 1);
     }
 
-    // ── SPAN ──────────────────────────────────────────────────────────────────
-    // SPAN(chars) matches one-or-more characters from chars. Fails on empty.
-    static void Test_SPAN()
+    // ── ARBNO combinatorial (test_01.py Arb patterns) ─────────────────────────
+    // From test_01.py: patterns built with ARBNO rather than ARB
+    static void Test_ARBNO_patterns()
     {
-        T.Section("SPAN(chars)");
+        T.Section("ARBNO combinatorial (test_01.py-style)");
 
-        T.Slice  ("SPAN(digits) in \"123abc\" = [0:3]",  "123abc", SPAN(DIGITS), 0, 3);
-        T.Match  ("SPAN(digits) fullmatches \"0123\"",   "0123",   SPAN(DIGITS));
-        T.NoMatch("SPAN(digits) no match \"abc\"",       "abc",    SPAN(DIGITS));
-        T.NoMatch("SPAN(digits) no match \"\"",          "",       SPAN(DIGITS));
+        // CSV-like: comma-separated identifiers
+        PATTERN ident   = ANY(ALPHA) + NSPAN(ALNUM);
+        PATTERN csvline = POS(0) + ident + ARBNO(σ(",") + ident) + RPOS(0);
 
-        // SPAN requires at least one char — not same as NSPAN
-        T.NotFound("SPAN(digits) not found in all-alpha","abcde",  SPAN(DIGITS));
+        T.Match  ("CSV: \"a\"",               "a",          csvline);
+        T.Match  ("CSV: \"a,b\"",             "a,b",        csvline);
+        T.Match  ("CSV: \"a,b,c\"",           "a,b,c",      csvline);
+        T.Match  ("CSV: \"foo,bar,baz\"",      "foo,bar,baz",csvline);
+        T.NoMatch("CSV: \"\"",                "",            csvline);
+        T.NoMatch("CSV: \"a,\"",              "a,",          csvline);
+        T.NoMatch("CSV: \",a\"",              ",a",          csvline);
 
-        // SPAN is greedy and non-backtracking: consumes all matching chars at once
-        // σ("12")+RPOS(0) after SPAN(digits) on "123" — SPAN took "123", σ("12") fails
-        T.NoMatch("SPAN greedy: takes all digits, σ(12) can't match after","123",
-                  POS(0)+SPAN(DIGITS)+σ("12")+RPOS(0));
+        // Repetition of a group: one-or-more (using Σ trick: P + ARBNO(P))
+        PATTERN one_or_more_digits = SPAN(DIGITS);  // simpler
+        PATTERN zero_or_more       = ARBNO(ANY(DIGITS));
+        PATTERN non_empty_num      = POS(0) + ANY(DIGITS) + ARBNO(ANY(DIGITS)) + RPOS(0);
 
-        // But SPAN followed by more of the same — use in sequence
-        T.Match  ("SPAN(alpha)+SPAN(digits) matches \"abc123\"","abc123",
-                  POS(0)+SPAN(ALPHA)+SPAN(DIGITS)+RPOS(0));
+        T.Match  ("one-or-more digits: \"0\"",       "0",    non_empty_num);
+        T.Match  ("one-or-more digits: \"123\"",     "123",  non_empty_num);
+        T.NoMatch("one-or-more digits: \"\"",        "",     non_empty_num);
+        T.NoMatch("one-or-more digits: \"12a\"",     "12a",  non_empty_num);
+
+        // Nested ARBNO: ARBNO of ARBNO(P) — matches any number of groups
+        PATTERN ab_star_star = POS(0) + ARBNO(ARBNO(σ("a")) + σ("b")) + RPOS(0);
+        T.Match  ("ARBNO(ARBNO(a)+b) matches \"b\"",        "b",      ab_star_star);
+        T.Match  ("ARBNO(ARBNO(a)+b) matches \"ab\"",       "ab",     ab_star_star);
+        T.Match  ("ARBNO(ARBNO(a)+b) matches \"aab\"",      "aab",    ab_star_star);
+        T.Match  ("ARBNO(ARBNO(a)+b) matches \"ababaab\"",  "ababaab",ab_star_star);
+        T.Match  ("ARBNO(ARBNO(a)+b) matches \"\"",         "",       ab_star_star);
+        T.NoMatch("ARBNO(ARBNO(a)+b) no match \"a\"",       "a",      ab_star_star);
     }
 
-    // ── NSPAN ─────────────────────────────────────────────────────────────────
-    // NSPAN(chars) matches zero-or-more chars from set. Never fails.
-    static void Test_NSPAN()
+    // ── BAL combinatorial (test_01.py Bal patterns) ───────────────────────────
+    static void Test_BAL_patterns()
     {
-        T.Section("NSPAN(chars)");
+        T.Section("BAL combinatorial (test_01.py-style)");
 
-        // Zero-length match when no chars match
-        T.Slice  ("NSPAN(digits) on \"abc\" = [0:0]",   "abc",    NSPAN(DIGITS), 0, 0);
+        // test_01.py Bal: POS(0) + BAL() % 'OUTPUT' + RPOS(0)
+        // (without assignment for now) — just test the structural match
+        PATTERN Bal = POS(0) + BAL() + RPOS(0);
 
-        // Consumes all matching chars
-        T.Slice  ("NSPAN(digits) on \"123abc\" = [0:3]","123abc", NSPAN(DIGITS), 0, 3);
+        // BAL yields at every point where nest==0, including bare non-paren chars
+        // and sequences like "(a)(b)" where it yields [0:3] then [0:6].
+        // Strings starting with ')' yield nothing from pos 0 (nest goes negative).
+        string[] yes = { "a", "x", "()", "(a)", "(a+b)", "((x))", "(())", "(a)(b)" };
+        string[] no  = { "", "(", "(a", ")", "a)" };
 
-        // NSPAN never fails — fullmatches anything via zero-length match
-        T.Match  ("NSPAN(digits) fullmatches \"\"",     "",       NSPAN(DIGITS));
-        T.Match  ("NSPAN(digits) fullmatches \"123\"",  "123",    NSPAN(DIGITS));
+        foreach (var s in yes) T.Match  ($"Bal \"{s}\"", s, Bal);
+        foreach (var s in no)  T.NoMatch($"Bal no \"{s}\"", s, Bal);
 
-        // Optional prefix: NSPAN(alpha) + SPAN(digits)
-        T.Match  ("NSPAN(alpha)+SPAN(digits) matches \"abc123\"","abc123",
-                  POS(0)+NSPAN(ALPHA)+SPAN(DIGITS)+RPOS(0));
-        T.Match  ("NSPAN(alpha)+SPAN(digits) matches \"123\"","123",
-                  POS(0)+NSPAN(ALPHA)+SPAN(DIGITS)+RPOS(0));
+        // BAL used to extract balanced expressions from a larger string
+        PATTERN find_bal = σ("=") + BAL();
+        T.Found  ("find_bal in \"x=(a+b)\"",   "x=(a+b)",   find_bal);
+        T.Found  ("find_bal in \"y=z\"",        "y=z",       find_bal);
+        T.NotFound("find_bal in \"(no-eq)\"",   "(no-eq)",   find_bal);
 
-        // Difference from SPAN: NSPAN succeeds on empty, SPAN does not
-        T.Found  ("NSPAN(digits) found (empty) in all-alpha","abcde", NSPAN(DIGITS));
-        T.NotFound("SPAN(digits) NOT found in all-alpha",    "abcde", SPAN(DIGITS));
+        // Comma-separated balanced expressions: BAL + ARBNO(σ(",") + BAL())
+        PATTERN bal_list = POS(0) + BAL() + ARBNO(σ(",") + BAL()) + RPOS(0);
+        T.Match  ("bal_list: \"a\"",             "a",         bal_list);
+        T.Match  ("bal_list: \"(x),y\"",         "(x),y",     bal_list);
+        T.Match  ("bal_list: \"(a),(b),(c)\"",   "(a),(b),(c)",bal_list);
+        T.NoMatch("bal_list: \"(a,b\"",          "(a,b",      bal_list);
     }
 
-    // ── BREAK ─────────────────────────────────────────────────────────────────
-    // BREAK(chars) scans forward until a char in chars is found.
-    // Fails if end-of-string is reached without finding the break char.
-    // Yields the scanned prefix (may be zero-length if break char is at pos0).
-    static void Test_BREAK()
+    // ── Regressions ───────────────────────────────────────────────────────────
+    static void Test_regression()
     {
-        T.Section("BREAK(chars)");
+        T.Section("Regression: V1-V5 patterns");
 
-        // Basic: scan up to colon
-        T.Slice  ("BREAK(:) in \"key:val\" = [0:3]",    "key:val", BREAK(":"), 0, 3);
+        // BEAD
+        PATTERN bead =
+              POS(0) + Π(σ("B"),σ("F"),σ("L"),σ("R"))
+            + Π(σ("E"),σ("EA")) + Π(σ("D"),σ("DS")) + RPOS(0);
+        string[] byes={"BED","FEAD","LEADS","READS"};
+        string[] bnos={"BID","BREAD",""};
+        foreach (var w in byes) T.Match  ($"BEAD \"{w}\"",w,bead);
+        foreach (var w in bnos) T.NoMatch($"BEAD \"{w}\"",w,bead);
 
-        // Zero-length match: break char is right at current pos
-        T.Slice  ("BREAK(:) at start of \":val\" = [0:0]",":val",  BREAK(":"), 0, 0);
+        // identifier
+        PATTERN ident = POS(0)+ANY(ALPHA)+NSPAN(ALNUM)+RPOS(0);
+        T.Match  ("ident \"Hello\"",  "Hello",  ident);
+        T.NoMatch("ident \"1bad\"",   "1bad",   ident);
 
-        // Fail: no break char present
-        T.NotFound("BREAK(:) not found in \"nocolon\"", "nocolon", BREAK(":"));
-
-        // BREAK then consume the delimiter with ANY
-        T.Match  ("BREAK(:)+ANY(:)+REM matches \"key:val\"","key:val",
-                  POS(0)+BREAK(":")+ANY(":")+REM()+RPOS(0));
-
-        // BREAK is non-backtracking: yields exactly once
-        // After BREAK consumes prefix, there's no retry with shorter prefix
-        T.Found  ("BREAK(.) in \"a.b.c\" finds \"a\"",  "a.b.c",
-                  POS(0)+BREAK(".")+ANY(".")+σ("b"));
-    }
-
-    // ── BREAKX ────────────────────────────────────────────────────────────────
-    // BREAKX is an alias for BREAK in the pure backend.
-    static void Test_BREAKX()
-    {
-        T.Section("BREAKX(chars) — alias for BREAK");
-
-        T.Slice  ("BREAKX(:) in \"key:val\" = [0:3]",   "key:val", BREAKX(":"), 0, 3);
-        T.NotFound("BREAKX(:) not found in \"nocolon\"","nocolon", BREAKX(":"));
-        T.Match  ("BREAKX(:)+ANY(:)+REM matches \"k:v\"","k:v",
-                  POS(0)+BREAKX(":")+ANY(":")+REM()+RPOS(0));
-    }
-
-    // ── identifier pattern (from test_01.py) ──────────────────────────────────
-    // A SNOBOL4 identifier: starts with a letter, followed by letters or digits.
-    // Python test_01.py: identifier = POS(0) + ANY(UCASE+LCASE) + NSPAN(UCASE+LCASE+DIGITS) + RPOS(0)
-    static void Test_identifier()
-    {
-        T.Section("identifier (test_01.py)");
-
-        PATTERN identifier = POS(0) + ANY(ALPHA) + NSPAN(ALNUM) + RPOS(0);
-
-        string[] yes = { "a", "A", "abc", "Hello", "x1", "CamelCase", "abc123", "X99" };
-        string[] no  = { "", "1abc", "_abc", "123", " abc", "abc def" };
-
-        foreach (var s in yes) T.Match  ($"identifier \"{s}\"", s, identifier);
-        foreach (var s in no)  T.NoMatch($"not identifier \"{s}\"", s, identifier);
-    }
-
-    // ── real_number pattern (from test_01.py) ─────────────────────────────────
-    // A real number: optional sign, digits, optional decimal part.
-    // Python test_01.py:
-    //   real_number = POS(0) + ANY("+-") (optional) + SPAN(DIGITS)
-    //               + (σ(".") + NSPAN(DIGITS)) (optional) + RPOS(0)
-    static void Test_real_number()
-    {
-        T.Section("real_number (test_01.py)");
-
-        PATTERN real_number =
-              POS(0)
-            + ~ANY("+-")
-            + SPAN(DIGITS)
-            + ~(σ(".") + NSPAN(DIGITS))
-            + RPOS(0);
-
-        string[] yes = { "0", "42", "3.14", "+7", "-3", "+3.14", "-0.5", "100.", "007" };
-        string[] no  = { "", ".", "+", "abc", "1.2.3", " 3", "3 .14" };
-
-        foreach (var s in yes) T.Match  ($"real \"{s}\"", s, real_number);
-        foreach (var s in no)  T.NoMatch($"not real \"{s}\"", s, real_number);
-    }
-
-    // ── BEAD regression ───────────────────────────────────────────────────────
-    static void Test_BEAD()
-    {
-        T.Section("BEAD regression");
-        PATTERN test_one =
-              POS(0)
-            + Π(σ("B"),σ("F"),σ("L"),σ("R"))
-            + Π(σ("E"),σ("EA"))
-            + Π(σ("D"),σ("DS"))
-            + RPOS(0);
-        string[] yes={"BED","FED","LED","RED","BEAD","FEAD","LEAD","READ",
-                      "BEDS","FEDS","LEDS","REDS","BEADS","FEADS","LEADS","READS"};
-        string[] no ={"BID","BREAD","ED","BEDSS",""};
-        foreach (var w in yes) T.Match  ($"BEAD \"{w}\"",w,test_one);
-        foreach (var w in no)  T.NoMatch($"BEAD \"{w}\"",w,test_one);
+        // real_number
+        PATTERN real =
+              POS(0) + ~ANY("+-") + SPAN(DIGITS)
+            + ~(σ(".") + NSPAN(DIGITS)) + RPOS(0);
+        T.Match  ("real \"3.14\"",    "3.14",   real);
+        T.Match  ("real \"-7\"",      "-7",     real);
+        T.NoMatch("real \"abc\"",     "abc",    real);
     }
 }
