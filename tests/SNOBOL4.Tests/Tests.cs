@@ -30,6 +30,7 @@ static class Tests {
         Test_LEN_TAB_RTAB_deferred();
         Test_charset_deferred();
         Test_combined_deferred();
+        Tests10.Run();
         T.Summary();
     }
 
