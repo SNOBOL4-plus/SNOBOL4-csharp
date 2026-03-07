@@ -177,16 +177,16 @@ static class Tests10
           (jInt % (Slot)S4._.jxVal)
         | σ("\"") + (jInt % (Slot)S4._.jxVal) + σ("\"");
 
-    // Each jNNN: capture directly into target var via δ (immediate), then Λ checks length
-    static readonly PATTERN jYYYY = δ(SPAN(DIGITS), "jxYYYY") + Λ(() => ((Slot)S4._.jxYYYY).Length == 4);
-    static readonly PATTERN jMM   = δ(SPAN(DIGITS), "jxMM")   + Λ(() => ((Slot)S4._.jxMM).Length   == 2);
-    static readonly PATTERN jDD   = δ(SPAN(DIGITS), "jxDD")   + Λ(() => ((Slot)S4._.jxDD).Length   == 2);
-    static readonly PATTERN jhh   = δ(SPAN(DIGITS), "jxhh")   + Λ(() => ((Slot)S4._.jxhh).Length   == 2);
-    static readonly PATTERN jmm2  = δ(SPAN(DIGITS), "jxmm")   + Λ(() => ((Slot)S4._.jxmm).Length   == 2);
-    static readonly PATTERN jss   = δ(SPAN(DIGITS), "jxss")   + Λ(() => ((Slot)S4._.jxss).Length   == 2);
-    static readonly PATTERN jNum3 = δ(SPAN(DIGITS), "jxN3")   + Λ(() => ((Slot)S4._.jxN3).Length   == 3);
-    static readonly PATTERN jNum4 = δ(SPAN(DIGITS), "jxN4")   + Λ(() => ((Slot)S4._.jxN4).Length   == 4);
-    static readonly PATTERN jNum2 = δ(SPAN(DIGITS), "jxN2")   + Λ(() => ((Slot)S4._.jxN2).Length   == 2);
+    // Each jNNN: capture directly into target var via Δ (immediate), then Λ checks length
+    static readonly PATTERN jYYYY = Δ(SPAN(DIGITS), "jxYYYY") + Λ(() => ((Slot)S4._.jxYYYY).Length == 4);
+    static readonly PATTERN jMM   = Δ(SPAN(DIGITS), "jxMM")   + Λ(() => ((Slot)S4._.jxMM).Length   == 2);
+    static readonly PATTERN jDD   = Δ(SPAN(DIGITS), "jxDD")   + Λ(() => ((Slot)S4._.jxDD).Length   == 2);
+    static readonly PATTERN jhh   = Δ(SPAN(DIGITS), "jxhh")   + Λ(() => ((Slot)S4._.jxhh).Length   == 2);
+    static readonly PATTERN jmm2  = Δ(SPAN(DIGITS), "jxmm")   + Λ(() => ((Slot)S4._.jxmm).Length   == 2);
+    static readonly PATTERN jss   = Δ(SPAN(DIGITS), "jxss")   + Λ(() => ((Slot)S4._.jxss).Length   == 2);
+    static readonly PATTERN jNum3 = Δ(SPAN(DIGITS), "jxN3")   + Λ(() => ((Slot)S4._.jxN3).Length   == 3);
+    static readonly PATTERN jNum4 = Δ(SPAN(DIGITS), "jxN4")   + Λ(() => ((Slot)S4._.jxN4).Length   == 4);
+    static readonly PATTERN jNum2 = Δ(SPAN(DIGITS), "jxN2")   + Λ(() => ((Slot)S4._.jxN2).Length   == 2);
     static readonly PATTERN jDate = jYYYY + σ("-") + jMM + σ("-") + jDD;
     static readonly PATTERN jTime = jhh + σ(":") + jmm2 + σ(":") + jss;
 

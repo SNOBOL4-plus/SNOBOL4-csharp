@@ -1,19 +1,25 @@
-// Trace.cs — SNOBOL4 pattern-match tracing
+// Trace.cs — sliding-window pattern-match trace output
 //
-// Mirrors Python's DEBUG_formatter + logging levels exactly:
+// TRACE(level, window) enables diagnostic output from γ() methods.
+// Output goes to Console.Error by default; pass a TextWriter to redirect.
 //
-//   TRACE(TraceLevel.Debug)    — trying, backtracking, success (verbose)
-//   TRACE(TraceLevel.Info)     — success + backtracking only
-//   TRACE(TraceLevel.Warning)  — backtracking only
-//   TRACE(TraceLevel.Off)      — silent (default)
+// Levels (increasing verbosity):
+//   TraceLevel.Off      — silent (default)
+//   TraceLevel.Warning  — backtracking only
+//   TraceLevel.Info     — success and backtracking
+//   TraceLevel.Debug    — trying, success, and backtracking
 //
-// Output format (same as Python):
+// Output format — each line shows a fixed-width view of the subject string
+// centered on the current cursor position, followed by the pattern event:
 //
-//   'left context'|  pos|'right context'   PATTERN SUCCESS(start,len)=matched
-//   'left context'|  pos|'right context'   PATTERN backtracking...
+//   '     hello'|   5|'42        '   SPAN("abc...") SUCCESS(0,5)=hello
+//   '   hello42'|   7|'          '   SPAN("0-9...") SUCCESS(5,2)=42
+//   '   hello42'|   7|'          '   RPOS(0) backtracking(7)...
 //
-// The left side is right-aligned (reversed padding), the right side left-aligned.
-// This gives a fixed-width window centered on the current cursor position.
+// The left half of the window is right-aligned (text runs up to the cursor
+// bar) and the right half is left-aligned (text runs away from it).  Padding
+// spaces fill whichever side has fewer characters than the window half-width.
+// This gives a stable fixed-width display as the cursor advances.
 // ─────────────────────────────────────────────────────────────────────────────
 using System;
 using System.IO;
@@ -24,18 +30,17 @@ namespace SNOBOL4
 
     public static class Tracer
     {
-        // ── configuration ─────────────────────────────────────────────────────
         static TraceLevel _level  = TraceLevel.Off;
-        static int        _window = 12;   // half-window size (chars each side)
+        static int        _window = 12;   // half-width of the context window (chars each side)
         static TextWriter _out    = Console.Error;
 
-        public static TraceLevel Level  => _level;
-        public static bool IsDebug   => _level >= TraceLevel.Debug;
-        public static bool IsInfo    => _level >= TraceLevel.Info;
-        public static bool IsWarning => _level >= TraceLevel.Warning;
+        public static TraceLevel Level    => _level;
+        public static bool       IsDebug   => _level >= TraceLevel.Debug;
+        public static bool       IsInfo    => _level >= TraceLevel.Info;
+        public static bool       IsWarning => _level >= TraceLevel.Warning;
 
         /// <summary>
-        /// Configure tracing.  Call with no args to turn off.
+        /// Configure tracing.  Call TRACE() with no arguments to turn it off.
         /// </summary>
         public static void TRACE(TraceLevel level = TraceLevel.Off, int window = 12, TextWriter? output = null)
         {
@@ -45,12 +50,10 @@ namespace SNOBOL4
         }
 
         // ── window rendering ──────────────────────────────────────────────────
-        // Python:
-        //   left  = subject[max(0, pos-size) : pos]
-        //   right = subject[pos : min(pos+size, len)]
-        //   pad_left  = ' ' * max(0, size - len(left))
-        //   pad_right = ' ' * max(0, size - len(right))
-        //   return f"{repr(pad_left+left)}|{pos:4d}|{repr(right+pad_right)}"
+        // Builds the fixed-width context string:
+        //   left  = subject[max(0, pos-size) .. pos]        right-fill with spaces
+        //   right = subject[pos .. min(pos+size, len)]       left-fill with spaces
+        // Both halves are then repr-escaped and framed:  'left'|pos|'right'
         static string Window(MatchState st)
         {
             int pos  = st.pos;
@@ -62,47 +65,46 @@ namespace SNOBOL4
             var padLeft  = new string(' ', Math.Max(0, size - left.Length));
             var padRight = new string(' ', Math.Max(0, size - right.Length));
 
-            // repr-style: wrap in single quotes, escape specials
             return $"'{Esc(padLeft + left)}'|{pos,4}|'{Esc(right + padRight)}'";
         }
 
+        // Escape special characters for readable single-quoted display
         static string Esc(string s) =>
             s.Replace("\\", "\\\\").Replace("'", "\\'")
              .Replace("\n", "\\n").Replace("\r", "\\r")
              .Replace("\t", "\\t");
 
+        // Indent by nesting depth so nested patterns are visually grouped
         static string Indent(MatchState st) => new string(' ', st.depth * 2);
 
-        // ── emit helpers ──────────────────────────────────────────────────────
         static void Emit(string win, string indent, string msg) =>
             _out.WriteLine($"{win}   {indent}{msg}");
 
-        // ── public trace calls (called from γ() methods) ──────────────────────
+        // ── public emit methods called from γ() ──────────────────────────────
 
-        /// DEBUG — "trying" at entry to γ()
+        /// DEBUG — emitted at the start of γ(), before any match is attempted
         public static void Debug(MatchState st, string patName)
         {
             if (!IsDebug) return;
             Emit(Window(st), Indent(st), $"{patName} trying({st.pos})...");
         }
 
-        /// INFO — match succeeded, yielding a slice
+        /// INFO — emitted when a sub-pattern succeeds and yields a non-empty slice
         public static void Info(MatchState st, string patName, int start, int stop)
         {
             if (!IsInfo) return;
             var matched = st.subject.Substring(start, stop - start);
-            Emit(Window(st), Indent(st),
-                 $"{patName} SUCCESS({start},{stop - start})={Esc(matched)}");
+            Emit(Window(st), Indent(st), $"{patName} SUCCESS({start},{stop - start})={Esc(matched)}");
         }
 
-        /// INFO — zero-length match (POS, RPOS, ε, etc.)
+        /// INFO — emitted for zero-length successes (POS, RPOS, ε, anchors, etc.)
         public static void InfoZ(MatchState st, string patName)
         {
             if (!IsInfo) return;
             Emit(Window(st), Indent(st), $"{patName} SUCCESS({st.pos},0)=");
         }
 
-        /// WARNING — backtracking after yield
+        /// WARNING — emitted when a pattern resumes after yielding (backtracking)
         public static void Warn(MatchState st, string patName)
         {
             if (!IsWarning) return;
