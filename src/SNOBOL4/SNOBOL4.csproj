@@ -5,7 +5,22 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <RootNamespace>SNOBOL4</RootNamespace>
     <AssemblyName>SNOBOL4</AssemblyName>
-    <Version>0.10.0</Version>
-    <Description>SNOBOL4-style pattern matching library for C# (.NET 8)</Description>
+
+    <!-- NuGet package metadata -->
+    <PackageId>SNOBOL4csharp</PackageId>
+    <Version>0.4.0</Version>
+    <Authors>Lon Jones Cherryholmes</Authors>
+    <Copyright>Copyright © 2026 Lon Jones Cherryholmes</Copyright>
+    <Description>SNOBOL4-style pattern matching library for C# (.NET 10). Port of SNOBOL4python. Patterns are first-class objects; matching is lazy and backtracking; captures use plain C# delegates.</Description>
+    <PackageTags>SNOBOL;SNOBOL4;SPITBOL;SPIPAT;pattern matching;string;parsing</PackageTags>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/LCherryholmes/SNOBOL4csharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/LCherryholmes/SNOBOL4csharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>
