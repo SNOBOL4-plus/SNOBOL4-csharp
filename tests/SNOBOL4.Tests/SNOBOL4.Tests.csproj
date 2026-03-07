@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
+    <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
-    <RootNamespace>SNOBOL4</RootNamespace>
-    <AssemblyName>SNOBOL4</AssemblyName>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
-    <LangVersion>latest</LangVersion>
+    <RootNamespace>SNOBOL4.Tests</RootNamespace>
   </PropertyGroup>
-
+  <ItemGroup>
+    <ProjectReference Include="../../src/SNOBOL4/SNOBOL4.csproj" />
+  </ItemGroup>
 </Project>

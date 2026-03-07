@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>SNOBOL4</RootNamespace>
+    <AssemblyName>SNOBOL4</AssemblyName>
+    <Version>0.10.0</Version>
+    <Description>SNOBOL4-style pattern matching library for C# (.NET 8)</Description>
+  </PropertyGroup>
+</Project>
