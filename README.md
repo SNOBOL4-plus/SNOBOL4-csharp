@@ -1,4 +1,5 @@
 # SNOBOL4csharp
+[![License: LGPL v3](https://img.shields.io/badge/License-LGPL_v3-blue.svg)](https://www.gnu.org/licenses/lgpl-3.0)
 
 A C# port of the SNOBOL4 pattern-matching engine, ported from
 [SNOBOL4python](https://github.com/LCherryholmes/SNOBOL4python).
